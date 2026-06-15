@@ -13,6 +13,12 @@ const publicDir = path.join(__dirname, "public");
 const defaultAssetPath = String(process.env.EMAIL_TRACKING_ASSET_PATH || "/image/060926-Mailing2_01.png").trim();
 const host = process.env.HOST || "127.0.0.1";
 const port = Number.parseInt(process.env.PORT || "3010", 10);
+const adminUsername = process.env.ADMIN_USERNAME || "admin";
+const adminPassword = process.env.ADMIN_PASSWORD || "";
+const adminSessionSecret = process.env.ADMIN_SESSION_SECRET || crypto.randomBytes(32).toString("hex");
+const adminTimeZone = process.env.ADMIN_TIME_ZONE || "America/Mexico_City";
+const sessionCookieName = "ets_admin";
+const maxAdminPageSize = 200;
 
 const TRACKING_PIXEL_BUFFER = Buffer.from(
   "R0lGODlhAQABAPAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
@@ -34,6 +40,150 @@ function sendJson(response, statusCode, payload) {
     "Content-Type": "application/json; charset=utf-8"
   });
   response.end(JSON.stringify(payload));
+}
+
+function redirect(response, location) {
+  response.writeHead(302, { Location: location });
+  response.end();
+}
+
+function sendHtml(response, statusCode, html) {
+  response.writeHead(statusCode, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store"
+  });
+  response.end(html);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function parseCookies(request) {
+  const cookieHeader = request.headers.cookie || "";
+  return Object.fromEntries(
+    cookieHeader
+      .split(";")
+      .map((cookie) => cookie.trim())
+      .filter(Boolean)
+      .map((cookie) => {
+        const separatorIndex = cookie.indexOf("=");
+        if (separatorIndex === -1) {
+          return [cookie, ""];
+        }
+
+        return [
+          decodeURIComponent(cookie.slice(0, separatorIndex)),
+          decodeURIComponent(cookie.slice(separatorIndex + 1))
+        ];
+      })
+  );
+}
+
+function timingSafeEqualString(left, right) {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+
+  if (leftBuffer.length !== rightBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function signSessionPayload(payload) {
+  return crypto.createHmac("sha256", adminSessionSecret).update(payload).digest("base64url");
+}
+
+function createSessionCookie(username) {
+  const expiresAt = Date.now() + 1000 * 60 * 60 * 12;
+  const payload = Buffer.from(JSON.stringify({ username, expiresAt })).toString("base64url");
+  const signature = signSessionPayload(payload);
+
+  return `${sessionCookieName}=${encodeURIComponent(`${payload}.${signature}`)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200`;
+}
+
+function clearSessionCookie() {
+  return `${sessionCookieName}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`;
+}
+
+function getAdminSession(request) {
+  const sessionValue = parseCookies(request)[sessionCookieName];
+  if (!sessionValue || !sessionValue.includes(".")) {
+    return null;
+  }
+
+  const [payload, signature] = sessionValue.split(".");
+  if (!payload || !signature || !timingSafeEqualString(signature, signSessionPayload(payload))) {
+    return null;
+  }
+
+  try {
+    const session = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    if (!session.username || Number(session.expiresAt) < Date.now()) {
+      return null;
+    }
+
+    return session;
+  } catch {
+    return null;
+  }
+}
+
+function requireAdmin(request, response) {
+  const session = getAdminSession(request);
+  if (session) {
+    return session;
+  }
+
+  if (request.url?.startsWith("/api/")) {
+    sendJson(response, 401, { ok: false, error: "unauthorized" });
+  } else {
+    redirect(response, "/admin/login");
+  }
+
+  return null;
+}
+
+async function readFormBody(request) {
+  const body = await readRawBody(request);
+  return Object.fromEntries(new URLSearchParams(body));
+}
+
+async function readRawBody(request) {
+  const chunks = [];
+
+  for await (const chunk of request) {
+    chunks.push(chunk);
+  }
+
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat("es-MX", {
+    dateStyle: "medium",
+    timeStyle: "medium",
+    timeZone: adminTimeZone
+  }).format(new Date(value));
+}
+
+function clampInteger(value, fallback, min, max) {
+  const parsed = Number.parseInt(String(value || ""), 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(parsed, min), max);
 }
 
 function normalizeAssetPath(assetPath) {
@@ -68,13 +218,7 @@ function buildAbsoluteUrl(request, routePath, searchParams = {}) {
 }
 
 async function readJsonBody(request) {
-  const chunks = [];
-
-  for await (const chunk of request) {
-    chunks.push(chunk);
-  }
-
-  const rawBody = Buffer.concat(chunks).toString("utf8").trim();
+  const rawBody = (await readRawBody(request)).trim();
   if (!rawBody) {
     return {};
   }
@@ -160,19 +304,116 @@ async function registerEmailTrackingEvent(request, trackingLink, eventType) {
   );
 }
 
-async function listEmailTrackingLinks() {
+function buildAdminFilters(searchParams) {
+  const where = [];
+  const params = [];
+  const query = String(searchParams.get("q") || "").trim();
+  const campaign = String(searchParams.get("campaign") || "").trim();
+
+  if (query) {
+    where.push("(email LIKE ? OR token LIKE ?)");
+    params.push(`%${query}%`, `%${query}%`);
+  }
+
+  if (campaign) {
+    where.push("campaign = ?");
+    params.push(campaign);
+  }
+
+  return {
+    whereSql: where.length ? `WHERE ${where.join(" AND ")}` : "",
+    params,
+    query,
+    campaign
+  };
+}
+
+async function listEmailTrackingLinksPage(searchParams) {
+  const page = clampInteger(searchParams.get("page"), 1, 1, 100000);
+  const limit = clampInteger(searchParams.get("limit"), 50, 1, maxAdminPageSize);
+  const offset = (page - 1) * limit;
+  const filters = buildAdminFilters(searchParams);
+
+  const [countRows] = await pool.execute(
+    `SELECT COUNT(*) AS total FROM email_tracking_links ${filters.whereSql}`,
+    filters.params
+  );
+
+  const [rows] = await pool.execute(
+    `SELECT
+       links.id,
+       links.email,
+       links.campaign,
+       links.token,
+       links.asset_path AS assetPath,
+       links.open_count AS openCount,
+       links.last_opened_at AS lastOpenedAt,
+       links.created_at AS createdAt,
+       latest.event_type AS latestEventType,
+       latest.created_at AS latestEventAt
+     FROM email_tracking_links links
+     LEFT JOIN email_tracking_events latest
+       ON latest.id = (
+         SELECT events.id
+         FROM email_tracking_events events
+         WHERE events.tracking_link_id = links.id
+         ORDER BY events.created_at DESC, events.id DESC
+         LIMIT 1
+       )
+     ${filters.whereSql}
+     ORDER BY links.created_at DESC
+     LIMIT ${limit} OFFSET ${offset}`,
+    filters.params
+  );
+
+  return {
+    page,
+    limit,
+    total: Number(countRows[0]?.total || 0),
+    rows: rows.map((row) => ({
+      ...row,
+      createdAtText: formatDateTime(row.createdAt),
+      lastOpenedAtText: formatDateTime(row.lastOpenedAt),
+      latestEventAtText: formatDateTime(row.latestEventAt)
+    }))
+  };
+}
+
+async function listEmailTrackingEventsForLink(linkId) {
+  const [rows] = await pool.execute(
+    `SELECT id, event_type AS eventType, user_agent AS userAgent,
+            ip_address AS ipAddress, referer, query_string AS queryString,
+            created_at AS createdAt
+     FROM email_tracking_events
+     WHERE tracking_link_id = ?
+     ORDER BY created_at DESC, id DESC
+     LIMIT 500`,
+    [linkId]
+  );
+
+  return rows.map((row) => ({
+    ...row,
+    createdAtText: formatDateTime(row.createdAt)
+  }));
+}
+
+async function listEmailTrackingLinksForExport(searchParams) {
+  const filters = buildAdminFilters(searchParams);
   const [rows] = await pool.execute(
     `SELECT id, email, campaign, token, asset_path AS assetPath,
             open_count AS openCount, last_opened_at AS lastOpenedAt,
             metadata_json AS metadataJson, created_at AS createdAt
      FROM email_tracking_links
-     ORDER BY created_at DESC`
+     ${filters.whereSql}
+     ORDER BY created_at DESC`,
+    filters.params
   );
 
   return rows;
 }
 
-async function listEmailTrackingEvents() {
+async function listEmailTrackingEventsForExport(searchParams) {
+  const filters = buildAdminFilters(searchParams);
   const [rows] = await pool.execute(
     `SELECT events.id, events.event_type AS eventType, events.user_agent AS userAgent,
             events.ip_address AS ipAddress, events.referer, events.query_string AS queryString,
@@ -180,7 +421,9 @@ async function listEmailTrackingEvents() {
      FROM email_tracking_events events
      INNER JOIN email_tracking_links links
        ON links.id = events.tracking_link_id
-     ORDER BY events.created_at DESC`
+     ${filters.whereSql}
+     ORDER BY events.created_at DESC, events.id DESC`,
+    filters.params
   );
 
   return rows;
@@ -288,14 +531,250 @@ async function handleTrackingImage(request, response) {
   }
 }
 
-async function handleExport(response) {
+function renderLoginPage(errorMessage = "") {
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Email Tracking Admin</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f5f7fb; color: #18212f; }
+    main { width: min(420px, calc(100vw - 32px)); background: #fff; border: 1px solid #d9e0ea; border-radius: 8px; padding: 28px; box-shadow: 0 18px 45px rgba(30, 41, 59, 0.08); }
+    h1 { margin: 0 0 20px; font-size: 22px; line-height: 1.2; }
+    label { display: grid; gap: 8px; margin: 14px 0; font-size: 13px; font-weight: 650; color: #334155; }
+    input { height: 42px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 0 12px; font: inherit; }
+    button { width: 100%; height: 42px; margin-top: 10px; border: 0; border-radius: 6px; background: #1463ff; color: white; font: inherit; font-weight: 700; cursor: pointer; }
+    .error { margin: 0 0 12px; color: #b42318; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Email Tracking Admin</h1>
+    ${errorMessage ? `<p class="error">${escapeHtml(errorMessage)}</p>` : ""}
+    <form method="post" action="/admin/login">
+      <label>Usuario <input name="username" autocomplete="username" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Entrar</button>
+    </form>
+  </main>
+</body>
+</html>`;
+}
+
+function renderAdminPage() {
+  return `<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Email Tracking Admin</title>
+  <style>
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f6f8fb; color: #172033; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 24px; background: #fff; border-bottom: 1px solid #dce3ed; position: sticky; top: 0; z-index: 2; }
+    h1 { margin: 0; font-size: 19px; line-height: 1.2; }
+    main { padding: 20px 24px 32px; }
+    .toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(160px, 240px) auto auto; gap: 10px; align-items: end; margin-bottom: 14px; }
+    label { display: grid; gap: 6px; font-size: 12px; font-weight: 700; color: #42526b; }
+    input, select { height: 38px; border: 1px solid #cbd5e1; border-radius: 6px; padding: 0 10px; font: inherit; background: #fff; }
+    button, a.button { height: 38px; border: 0; border-radius: 6px; background: #1463ff; color: #fff; font: inherit; font-weight: 700; padding: 0 14px; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; cursor: pointer; white-space: nowrap; }
+    button.secondary, a.secondary { background: #eef2f7; color: #172033; border: 1px solid #cbd5e1; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid #dce3ed; border-radius: 8px; overflow: hidden; }
+    th, td { padding: 10px 11px; text-align: left; border-bottom: 1px solid #e8edf4; font-size: 13px; vertical-align: top; }
+    th { background: #f9fbfd; color: #42526b; font-size: 12px; }
+    tr:last-child td { border-bottom: 0; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; overflow-wrap: anywhere; }
+    .muted { color: #667085; }
+    .pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; }
+    .events { margin-top: 18px; }
+    .events h2 { font-size: 16px; margin: 0 0 10px; }
+    .empty { padding: 22px; text-align: center; color: #667085; background: #fff; border: 1px solid #dce3ed; border-radius: 8px; }
+    .danger { background: #fff; color: #b42318; border: 1px solid #f0b8b0; }
+    @media (max-width: 820px) {
+      header { align-items: flex-start; }
+      main { padding: 16px; }
+      .toolbar { grid-template-columns: 1fr; }
+      table { display: block; overflow-x: auto; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Email Tracking Admin</h1>
+    <form method="post" action="/admin/logout"><button class="danger" type="submit">Salir</button></form>
+  </header>
+  <main>
+    <form class="toolbar" id="filters">
+      <label>Buscar <input id="q" name="q" placeholder="email o token"></label>
+      <label>Campaña <input id="campaign" name="campaign" placeholder="campaña"></label>
+      <button type="submit">Filtrar</button>
+      <a class="button secondary" id="exportLink" href="/api/email-tracking/export">Exportar Excel</a>
+    </form>
+    <div id="summary" class="muted"></div>
+    <div id="table"></div>
+    <div class="pager">
+      <button class="secondary" id="prev" type="button">Anterior</button>
+      <span id="pageInfo" class="muted"></span>
+      <button class="secondary" id="next" type="button">Siguiente</button>
+    </div>
+    <section class="events" id="events"></section>
+  </main>
+  <script>
+    let page = 1;
+    const limit = 50;
+    const state = { q: "", campaign: "" };
+    const table = document.querySelector("#table");
+    const events = document.querySelector("#events");
+    const summary = document.querySelector("#summary");
+    const pageInfo = document.querySelector("#pageInfo");
+    const exportLink = document.querySelector("#exportLink");
+
+    function escapeHtml(value) {
+      return String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#039;"
+      }[char]));
+    }
+
+    function params(extra = {}) {
+      const searchParams = new URLSearchParams({ page, limit, ...extra });
+      if (state.q) searchParams.set("q", state.q);
+      if (state.campaign) searchParams.set("campaign", state.campaign);
+      return searchParams;
+    }
+
+    async function loadLinks() {
+      table.innerHTML = '<div class="empty">Cargando...</div>';
+      const response = await fetch("/api/admin/links?" + params());
+      if (!response.ok) {
+        location.href = "/admin/login";
+        return;
+      }
+      const data = await response.json();
+      const totalPages = Math.max(1, Math.ceil(data.total / data.limit));
+      summary.textContent = data.total + " envíos encontrados";
+      pageInfo.textContent = "Página " + data.page + " de " + totalPages;
+      document.querySelector("#prev").disabled = data.page <= 1;
+      document.querySelector("#next").disabled = data.page >= totalPages;
+      const exportParams = params({ page: undefined, limit: undefined });
+      exportParams.delete("page");
+      exportParams.delete("limit");
+      exportLink.href = "/api/email-tracking/export" + (exportParams.toString() ? "?" + exportParams : "");
+
+      if (!data.rows.length) {
+        table.innerHTML = '<div class="empty">Sin envíos</div>';
+        events.innerHTML = "";
+        return;
+      }
+
+      table.innerHTML = '<table><thead><tr><th>Email</th><th>Campaña</th><th>Aperturas</th><th>Última apertura</th><th>Último evento</th><th>Creado</th><th>Token</th><th></th></tr></thead><tbody>' +
+        data.rows.map((row) => '<tr>' +
+          '<td>' + escapeHtml(row.email) + '</td>' +
+          '<td>' + escapeHtml(row.campaign) + '</td>' +
+          '<td>' + Number(row.openCount || 0) + '</td>' +
+          '<td>' + escapeHtml(row.lastOpenedAtText || "") + '</td>' +
+          '<td>' + escapeHtml(row.latestEventType || "") + '<br><span class="muted">' + escapeHtml(row.latestEventAtText || "") + '</span></td>' +
+          '<td>' + escapeHtml(row.createdAtText || "") + '</td>' +
+          '<td><code>' + escapeHtml(row.token) + '</code></td>' +
+          '<td><button class="secondary" type="button" data-link-id="' + row.id + '">Eventos</button></td>' +
+        '</tr>').join("") +
+        '</tbody></table>';
+
+      table.querySelectorAll("[data-link-id]").forEach((button) => {
+        button.addEventListener("click", () => loadEvents(button.dataset.linkId));
+      });
+    }
+
+    async function loadEvents(linkId) {
+      events.innerHTML = '<div class="empty">Cargando eventos...</div>';
+      const response = await fetch("/api/admin/links/" + encodeURIComponent(linkId) + "/events");
+      const data = await response.json();
+      if (!data.rows.length) {
+        events.innerHTML = '<div class="empty">Este envío todavía no tiene eventos</div>';
+        return;
+      }
+      events.innerHTML = '<h2>Eventos del envío</h2><table><thead><tr><th>Tipo</th><th>IP</th><th>Referer</th><th>User Agent</th><th>Fecha y hora</th></tr></thead><tbody>' +
+        data.rows.map((row) => '<tr>' +
+          '<td>' + escapeHtml(row.eventType) + '</td>' +
+          '<td>' + escapeHtml(row.ipAddress || "") + '</td>' +
+          '<td>' + escapeHtml(row.referer || "") + '</td>' +
+          '<td>' + escapeHtml(row.userAgent || "") + '</td>' +
+          '<td>' + escapeHtml(row.createdAtText || "") + '</td>' +
+        '</tr>').join("") +
+        '</tbody></table>';
+    }
+
+    document.querySelector("#filters").addEventListener("submit", (event) => {
+      event.preventDefault();
+      state.q = document.querySelector("#q").value.trim();
+      state.campaign = document.querySelector("#campaign").value.trim();
+      page = 1;
+      loadLinks();
+    });
+    document.querySelector("#prev").addEventListener("click", () => { page = Math.max(1, page - 1); loadLinks(); });
+    document.querySelector("#next").addEventListener("click", () => { page += 1; loadLinks(); });
+    loadLinks();
+  </script>
+</body>
+</html>`;
+}
+
+async function handleAdminLogin(request, response) {
+  const form = await readFormBody(request);
+  const username = String(form.username || "");
+  const password = String(form.password || "");
+
+  if (
+    adminPassword &&
+    timingSafeEqualString(username, adminUsername) &&
+    timingSafeEqualString(password, adminPassword)
+  ) {
+    response.writeHead(302, {
+      Location: "/admin",
+      "Set-Cookie": createSessionCookie(username)
+    });
+    response.end();
+    return;
+  }
+
+  sendHtml(response, 401, renderLoginPage("Usuario o password inválidos"));
+}
+
+async function handleAdminLinks(request, response) {
+  const requestUrl = new URL(request.url, "http://localhost");
+  const pageData = await listEmailTrackingLinksPage(requestUrl.searchParams);
+  sendJson(response, 200, { ok: true, ...pageData });
+}
+
+async function handleAdminEvents(request, response, linkId) {
+  const rows = await listEmailTrackingEventsForLink(linkId);
+  sendJson(response, 200, { ok: true, rows });
+}
+
+async function handleExport(request, response) {
   try {
+    const requestUrl = new URL(request.url, "http://localhost");
     const [links, events] = await Promise.all([
-      listEmailTrackingLinks(),
-      listEmailTrackingEvents()
+      listEmailTrackingLinksForExport(requestUrl.searchParams),
+      listEmailTrackingEventsForExport(requestUrl.searchParams)
     ]);
 
-    const workbook = new ExcelJS.Workbook();
+    response.writeHead(200, {
+      "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "Content-Disposition": `attachment; filename="email-tracking-${Date.now()}.xlsx"`,
+      "Cache-Control": "no-store"
+    });
+
+    const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+      stream: response,
+      useStyles: true,
+      useSharedStrings: true
+    });
     const linksSheet = workbook.addWorksheet("TrackingLinks");
     linksSheet.columns = [
       { header: "Email", key: "email", width: 32 },
@@ -303,17 +782,20 @@ async function handleExport(response) {
       { header: "Token", key: "token", width: 68 },
       { header: "Asset Path", key: "assetPath", width: 30 },
       { header: "Open Count", key: "openCount", width: 12 },
-      { header: "Last Opened At", key: "lastOpenedAt", width: 22 },
+      { header: "Last Opened At", key: "lastOpenedAtText", width: 28 },
       { header: "Metadata", key: "metadata", width: 40 },
-      { header: "Created At", key: "createdAt", width: 22 }
+      { header: "Created At", key: "createdAtText", width: 28 }
     ];
 
     links.forEach((row) => {
       linksSheet.addRow({
         ...row,
+        lastOpenedAtText: formatDateTime(row.lastOpenedAt),
+        createdAtText: formatDateTime(row.createdAt),
         metadata: JSON.stringify(parseMetadata(row.metadataJson) || {})
-      });
+      }).commit();
     });
+    linksSheet.commit();
 
     const eventsSheet = workbook.addWorksheet("TrackingEvents");
     eventsSheet.columns = [
@@ -325,24 +807,26 @@ async function handleExport(response) {
       { header: "Referer", key: "referer", width: 32 },
       { header: "User Agent", key: "userAgent", width: 60 },
       { header: "Query String", key: "queryString", width: 28 },
-      { header: "Created At", key: "createdAt", width: 22 }
+      { header: "Created At", key: "createdAtText", width: 28 }
     ];
 
     events.forEach((row) => {
-      eventsSheet.addRow(row);
+      eventsSheet.addRow({
+        ...row,
+        createdAtText: formatDateTime(row.createdAt)
+      }).commit();
     });
+    eventsSheet.commit();
 
-    const buffer = await workbook.xlsx.writeBuffer();
-    response.writeHead(200, {
-      "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      "Content-Disposition": `attachment; filename="email-tracking-${Date.now()}.xlsx"`,
-      "Content-Length": buffer.length
-    });
-    response.end(buffer);
+    await workbook.commit();
   } catch (error) {
     console.error("tracking export error", error);
-    response.writeHead(500);
-    response.end("Internal server error");
+    if (!response.headersSent) {
+      response.writeHead(500);
+      response.end("Internal server error");
+    } else {
+      response.end();
+    }
   }
 }
 
@@ -353,8 +837,60 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
+  const requestUrl = new URL(request.url, "http://localhost");
+
   if (request.method === "GET" && request.url === "/health") {
     return sendJson(response, 200, { ok: true });
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/") {
+    return redirect(response, "/admin");
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/admin/login") {
+    if (getAdminSession(request)) {
+      return redirect(response, "/admin");
+    }
+
+    return sendHtml(response, 200, renderLoginPage());
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/admin/login") {
+    return handleAdminLogin(request, response);
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/admin/logout") {
+    response.writeHead(302, {
+      Location: "/admin/login",
+      "Set-Cookie": clearSessionCookie()
+    });
+    response.end();
+    return;
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/admin") {
+    if (!requireAdmin(request, response)) {
+      return;
+    }
+
+    return sendHtml(response, 200, renderAdminPage());
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/api/admin/links") {
+    if (!requireAdmin(request, response)) {
+      return;
+    }
+
+    return handleAdminLinks(request, response);
+  }
+
+  const eventsMatch = requestUrl.pathname.match(/^\/api\/admin\/links\/(\d+)\/events$/);
+  if (request.method === "GET" && eventsMatch) {
+    if (!requireAdmin(request, response)) {
+      return;
+    }
+
+    return handleAdminEvents(request, response, Number(eventsMatch[1]));
   }
 
   if (request.method === "POST" && request.url === "/api/email-tracking/link") {
@@ -369,8 +905,12 @@ const server = http.createServer(async (request, response) => {
     return handleTrackingImage(request, response);
   }
 
-  if (request.method === "GET" && request.url === "/api/email-tracking/export") {
-    return handleExport(response);
+  if (request.method === "GET" && requestUrl.pathname === "/api/email-tracking/export") {
+    if (!requireAdmin(request, response)) {
+      return;
+    }
+
+    return handleExport(request, response);
   }
 
   response.writeHead(404);
