@@ -400,45 +400,19 @@ async function listEmailTrackingEventsForLink(linkId) {
 async function listEmailTrackingLinksForExport(searchParams) {
   const filters = buildAdminFilters(searchParams);
   const [rows] = await pool.execute(
-    `SELECT id, email, campaign, token, asset_path AS assetPath,
-            open_count AS openCount, last_opened_at AS lastOpenedAt,
-            metadata_json AS metadataJson, created_at AS createdAt
+    `SELECT id, email, campaign, open_count AS openCount, created_at AS createdAt,
+            (
+              SELECT MIN(events.created_at)
+              FROM email_tracking_events events
+              WHERE events.tracking_link_id = email_tracking_links.id
+            ) AS firstOpenedAt
      FROM email_tracking_links
      ${filters.whereSql}
-     ORDER BY created_at DESC`,
+     ORDER BY firstOpenedAt IS NULL ASC, firstOpenedAt DESC, created_at DESC`,
     filters.params
   );
 
   return rows;
-}
-
-async function listEmailTrackingEventsForExport(searchParams) {
-  const filters = buildAdminFilters(searchParams);
-  const [rows] = await pool.execute(
-    `SELECT events.id, events.event_type AS eventType, events.user_agent AS userAgent,
-            events.ip_address AS ipAddress, events.referer, events.query_string AS queryString,
-            events.created_at AS createdAt, links.email, links.campaign, links.token
-     FROM email_tracking_events events
-     INNER JOIN email_tracking_links links
-       ON links.id = events.tracking_link_id
-     ${filters.whereSql}
-     ORDER BY events.created_at DESC, events.id DESC`,
-    filters.params
-  );
-
-  return rows;
-}
-
-function parseMetadata(metadataJson) {
-  if (!metadataJson) {
-    return null;
-  }
-
-  try {
-    return JSON.parse(metadataJson);
-  } catch {
-    return metadataJson;
-  }
 }
 
 async function handleCreateTrackingLink(request, response) {
@@ -759,10 +733,7 @@ async function handleAdminEvents(request, response, linkId) {
 async function handleExport(request, response) {
   try {
     const requestUrl = new URL(request.url, "http://localhost");
-    const [links, events] = await Promise.all([
-      listEmailTrackingLinksForExport(requestUrl.searchParams),
-      listEmailTrackingEventsForExport(requestUrl.searchParams)
-    ]);
+    const links = await listEmailTrackingLinksForExport(requestUrl.searchParams);
 
     response.writeHead(200, {
       "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -775,48 +746,59 @@ async function handleExport(request, response) {
       useStyles: true,
       useSharedStrings: true
     });
-    const linksSheet = workbook.addWorksheet("TrackingLinks");
-    linksSheet.columns = [
+
+    const summaryByCampaign = new Map();
+    links.forEach((row) => {
+      const campaignSummary = summaryByCampaign.get(row.campaign) || {
+        campaign: row.campaign,
+        totalEmails: 0,
+        openedEmails: 0,
+        totalOpens: 0
+      };
+
+      campaignSummary.totalEmails += 1;
+      campaignSummary.totalOpens += Number(row.openCount || 0);
+      if (Number(row.openCount || 0) > 0) {
+        campaignSummary.openedEmails += 1;
+      }
+
+      summaryByCampaign.set(row.campaign, campaignSummary);
+    });
+
+    const summarySheet = workbook.addWorksheet("Resumen");
+    summarySheet.columns = [
+      { header: "Campaña", key: "campaign", width: 28 },
+      { header: "Total emails", key: "totalEmails", width: 16 },
+      { header: "Emails abiertos", key: "openedEmails", width: 18 },
+      { header: "Numero total de aperturas", key: "totalOpens", width: 24 },
+      { header: "Tasa de apertura", key: "openRate", width: 18 }
+    ];
+
+    [...summaryByCampaign.values()]
+      .sort((left, right) => right.openedEmails - left.openedEmails || right.totalOpens - left.totalOpens)
+      .forEach((row) => {
+        summarySheet.addRow({
+          ...row,
+          openRate: row.totalEmails > 0 ? `${((row.openedEmails / row.totalEmails) * 100).toFixed(2)}%` : "0.00%"
+        }).commit();
+      });
+    summarySheet.commit();
+
+    const detailSheet = workbook.addWorksheet("Detalle");
+    detailSheet.columns = [
       { header: "Email", key: "email", width: 32 },
-      { header: "Campaign", key: "campaign", width: 24 },
-      { header: "Token", key: "token", width: 68 },
-      { header: "Asset Path", key: "assetPath", width: 30 },
-      { header: "Open Count", key: "openCount", width: 12 },
-      { header: "Last Opened At", key: "lastOpenedAtText", width: 28 },
-      { header: "Metadata", key: "metadata", width: 40 },
-      { header: "Created At", key: "createdAtText", width: 28 }
+      { header: "Campaña", key: "campaign", width: 28 },
+      { header: "Numero de aperturas", key: "openCount", width: 20 },
+      { header: "Fecha primer apertura", key: "firstOpenedAtText", width: 28 }
     ];
 
     links.forEach((row) => {
-      linksSheet.addRow({
+      detailSheet.addRow({
         ...row,
-        lastOpenedAtText: formatDateTime(row.lastOpenedAt),
-        createdAtText: formatDateTime(row.createdAt),
-        metadata: JSON.stringify(parseMetadata(row.metadataJson) || {})
+        firstOpenedAtText: formatDateTime(row.firstOpenedAt)
       }).commit();
     });
-    linksSheet.commit();
-
-    const eventsSheet = workbook.addWorksheet("TrackingEvents");
-    eventsSheet.columns = [
-      { header: "Email", key: "email", width: 32 },
-      { header: "Campaign", key: "campaign", width: 24 },
-      { header: "Token", key: "token", width: 68 },
-      { header: "Event Type", key: "eventType", width: 16 },
-      { header: "IP Address", key: "ipAddress", width: 20 },
-      { header: "Referer", key: "referer", width: 32 },
-      { header: "User Agent", key: "userAgent", width: 60 },
-      { header: "Query String", key: "queryString", width: 28 },
-      { header: "Created At", key: "createdAtText", width: 28 }
-    ];
-
-    events.forEach((row) => {
-      eventsSheet.addRow({
-        ...row,
-        createdAtText: formatDateTime(row.createdAt)
-      }).commit();
-    });
-    eventsSheet.commit();
+    detailSheet.commit();
 
     await workbook.commit();
   } catch (error) {
