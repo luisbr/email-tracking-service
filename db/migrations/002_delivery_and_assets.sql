@@ -74,6 +74,20 @@ CREATE TABLE IF NOT EXISTS send_jobs (
     CONSTRAINT fk_send_jobs_campaign FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE CASCADE
 );
 
-ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS test_sent_at DATETIME NULL AFTER completed_at;
-ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS approved_at DATETIME NULL AFTER test_sent_at;
-ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS approved_by BIGINT UNSIGNED NULL AFTER approved_at;
+DROP PROCEDURE IF EXISTS apply_delivery_columns;
+DELIMITER //
+CREATE PROCEDURE apply_delivery_columns()
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'campaigns' AND column_name = 'test_sent_at') THEN
+    ALTER TABLE campaigns ADD COLUMN test_sent_at DATETIME NULL AFTER completed_at;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'campaigns' AND column_name = 'approved_at') THEN
+    ALTER TABLE campaigns ADD COLUMN approved_at DATETIME NULL AFTER test_sent_at;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'campaigns' AND column_name = 'approved_by') THEN
+    ALTER TABLE campaigns ADD COLUMN approved_by BIGINT UNSIGNED NULL AFTER approved_at;
+  END IF;
+END//
+DELIMITER ;
+CALL apply_delivery_columns();
+DROP PROCEDURE apply_delivery_columns;

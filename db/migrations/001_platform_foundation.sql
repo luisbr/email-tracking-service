@@ -144,10 +144,6 @@ CREATE TABLE IF NOT EXISTS audience_contacts (
     CONSTRAINT fk_audience_contacts_audience FOREIGN KEY (audience_id) REFERENCES audiences(id) ON DELETE CASCADE
 );
 
-ALTER TABLE campaigns
-    ADD CONSTRAINT fk_campaigns_audience
-    FOREIGN KEY (audience_id) REFERENCES audiences(id) ON DELETE SET NULL;
-
 CREATE TABLE IF NOT EXISTS assets (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
     account_id BIGINT UNSIGNED NOT NULL,
@@ -169,8 +165,28 @@ CREATE TABLE IF NOT EXISTS assets (
     CONSTRAINT fk_assets_campaign FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE SET NULL
 );
 
--- Keep the old string campaign and link token flow intact. The nullable relation is populated only for new platform work.
-ALTER TABLE email_tracking_links ADD COLUMN IF NOT EXISTS campaign_id BIGINT UNSIGNED NULL AFTER campaign;
-ALTER TABLE email_tracking_links ADD INDEX IF NOT EXISTS idx_email_tracking_links_campaign_id (campaign_id);
-ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS audience_id BIGINT UNSIGNED NULL AFTER ses_account_id;
-ALTER TABLE audiences ADD COLUMN IF NOT EXISTS created_by BIGINT UNSIGNED NULL AFTER total_contacts;
+-- Keep the old string campaign and link token flow intact. MySQL versions on the
+-- deployment host do not support ADD ... IF NOT EXISTS, so use catalog checks.
+DROP PROCEDURE IF EXISTS apply_platform_foundation_alters;
+DELIMITER //
+CREATE PROCEDURE apply_platform_foundation_alters()
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'email_tracking_links' AND column_name = 'campaign_id') THEN
+    ALTER TABLE email_tracking_links ADD COLUMN campaign_id BIGINT UNSIGNED NULL AFTER campaign;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'email_tracking_links' AND index_name = 'idx_email_tracking_links_campaign_id') THEN
+    ALTER TABLE email_tracking_links ADD INDEX idx_email_tracking_links_campaign_id (campaign_id);
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'campaigns' AND column_name = 'audience_id') THEN
+    ALTER TABLE campaigns ADD COLUMN audience_id BIGINT UNSIGNED NULL AFTER ses_account_id;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'audiences' AND column_name = 'created_by') THEN
+    ALTER TABLE audiences ADD COLUMN created_by BIGINT UNSIGNED NULL AFTER total_contacts;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE table_schema = DATABASE() AND table_name = 'campaigns' AND constraint_name = 'fk_campaigns_audience') THEN
+    ALTER TABLE campaigns ADD CONSTRAINT fk_campaigns_audience FOREIGN KEY (audience_id) REFERENCES audiences(id) ON DELETE SET NULL;
+  END IF;
+END//
+DELIMITER ;
+CALL apply_platform_foundation_alters();
+DROP PROCEDURE apply_platform_foundation_alters;
