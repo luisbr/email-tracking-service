@@ -6,11 +6,15 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
+    "worker": "node worker.js",
     "tracking:links": "node scripts/generate-email-tracking-links.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1138.0",
+    "@aws-sdk/client-sesv2": "^3.1138.0",
     "dotenv": "^16.4.5",
     "exceljs": "^4.4.0",
-    "mysql2": "^3.11.3"
+    "mysql2": "^3.11.3",
+    "openai": "^6.49.0"
   }
 }

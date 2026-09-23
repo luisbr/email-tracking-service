@@ -6,6 +6,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ExcelJS from "exceljs";
 import mysql from "mysql2/promise";
+import { createPlatformRepository } from "./src/platform-repository.js";
+import { encryptSecret, renderTemplate, sendWithSes, uploadAssetToS3 } from "./src/platform-services.js";
+import { reviseTemplateWithAi } from "./src/template-agent.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,6 +22,9 @@ const adminSessionSecret = process.env.ADMIN_SESSION_SECRET || crypto.randomByte
 const adminTimeZone = process.env.ADMIN_TIME_ZONE || "America/Mexico_City";
 const sessionCookieName = "ets_admin";
 const maxAdminPageSize = 200;
+const platformDefaultAccountId = process.env.PLATFORM_DEFAULT_ACCOUNT_ID || "";
+const platformDefaultAccountName = process.env.PLATFORM_DEFAULT_ACCOUNT_NAME || "LBR";
+const platformEncryptionKey = process.env.PLATFORM_ENCRYPTION_KEY || "";
 
 const TRACKING_PIXEL_BUFFER = Buffer.from(
   "R0lGODlhAQABAPAAAAAAAAAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
@@ -34,6 +40,13 @@ const pool = mysql.createPool({
   waitForConnections: true,
   connectionLimit: 10
 });
+const platformRepository = createPlatformRepository(pool);
+let platformAccountPromise;
+
+function getPlatformAccount() {
+  platformAccountPromise ||= platformRepository.resolveDefaultAccount(platformDefaultAccountId, platformDefaultAccountName);
+  return platformAccountPromise;
+}
 
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
@@ -698,6 +711,18 @@ function renderAdminPage() {
 </html>`;
 }
 
+function renderPlatformPage() {
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Email Campaign Platform</title><style>
+  :root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#15211b;background:#f7f7f4}*{box-sizing:border-box}body{margin:0}.shell{display:grid;grid-template-columns:230px 1fr;min-height:100vh}.sidebar{background:#15211b;color:#edf3eb;padding:24px 16px}.brand{font-weight:800;font-size:18px;margin:0 8px 30px}.nav a{display:block;color:#cbd8cf;text-decoration:none;padding:9px 10px;border-radius:5px}.nav a:hover,.nav a.active{background:#244331;color:#fff}.content{max-width:1250px;width:100%;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #d9ded8;padding-bottom:18px}.top h1{font-size:24px;margin:0}.top a{color:#2463a5}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:20px}.panel{background:#fff;border:1px solid #d9ded8;border-radius:7px;padding:16px}.panel h2{font-size:16px;margin:0 0 12px}.panel p{color:#5c695f;font-size:13px}.panel form{display:grid;gap:8px}.panel input,.panel select,.panel textarea{width:100%;border:1px solid #bfc8c1;border-radius:5px;padding:9px;font:inherit;background:#fff}.panel textarea{min-height:80px}button{border:0;border-radius:5px;background:#167a54;color:#fff;padding:9px 12px;font:inherit;font-weight:700;cursor:pointer}button:hover{background:#116443}.list{margin:0;padding:0;list-style:none;max-height:220px;overflow:auto}.list li{border-top:1px solid #edf0eb;padding:9px 0;font-size:13px}.muted{color:#69756d}.notice{margin-top:16px;padding:10px 12px;background:#e8f3ed;border-left:3px solid #167a54;font-size:13px}.wide{grid-column:span 3}@media(max-width:850px){.shell{grid-template-columns:1fr}.sidebar{display:flex;align-items:center;gap:16px;padding:14px}.brand{margin:0}.nav{display:flex;gap:4px}.content{padding:18px}.grid{grid-template-columns:1fr}.wide{grid-column:auto}}</style></head><body><div class="shell"><aside class="sidebar"><p class="brand">Email Campaign Platform</p><nav class="nav"><a class="active" href="/platform">Operación</a><a href="/admin">Tracking</a></nav></aside><main class="content"><div class="top"><div><h1>Operación de campañas</h1><span class="muted">Clientes, audiencias, contenido y envíos</span></div><a href="/admin">Ver tracking histórico</a></div><div id="notice" class="notice">Cargando datos de plataforma...</div><section class="grid"><article class="panel"><h2>Clientes</h2><form id="clientForm"><input name="name" placeholder="Nombre del cliente" required><button>Crear cliente</button></form><ul id="clients" class="list"></ul></article><article class="panel"><h2>Audiencias</h2><form id="audienceForm"><select name="clientId" class="clientSelect" required></select><input name="name" placeholder="Nombre de audiencia" required><button>Crear audiencia</button></form><ul id="audiences" class="list"></ul></article><article class="panel"><h2>Templates</h2><form id="templateForm"><select name="clientId" class="clientSelect" required></select><input name="name" placeholder="Nombre del template" required><input name="subject" placeholder="Subject"><textarea name="html" placeholder="HTML compatible con email" required></textarea><button>Crear template</button></form><ul id="templates" class="list"></ul></article><article class="panel wide"><h2>Nueva campaña</h2><form id="campaignForm"><select name="clientId" class="clientSelect" required></select><input name="name" placeholder="Nombre de campaña" required><input name="subject" placeholder="Subject"><input name="audienceId" type="number" placeholder="ID de audiencia"><input name="templateVersionId" type="number" placeholder="ID de versión de template"><input name="sesAccountId" type="number" placeholder="ID de perfil SES"><button>Crear campaña</button></form><ul id="campaigns" class="list"></ul></article></section></main></div><script>
+  const notice=document.querySelector('#notice');let clients=[];
+  async function api(path,options={}){const r=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(d.error||'No se pudo completar la operación');return d}
+  function optionClients(){document.querySelectorAll('.clientSelect').forEach(s=>{const current=s.value;s.innerHTML='<option value="">Seleccionar cliente</option>'+clients.map(c=>'<option value="'+c.id+'">'+c.name+'</option>').join('');s.value=current})}
+  function list(id,rows,format){document.querySelector(id).innerHTML=rows.length?rows.map(format).join(''):'<li class="muted">Sin registros</li>'}
+  async function load(){try{const [c,a,t,ca]=await Promise.all(['/api/platform/clients','/api/platform/audiences','/api/platform/templates','/api/platform/campaigns'].map(api));clients=c.rows;optionClients();list('#clients',c.rows,x=>'<li><strong>'+x.name+'</strong><br><span class="muted">'+x.slug+'</span></li>');list('#audiences',a.rows,x=>'<li><strong>'+x.name+'</strong><br><span class="muted">'+x.totalContacts+' contactos · ID '+x.id+'</span></li>');list('#templates',t.rows,x=>'<li><strong>'+x.name+'</strong><br><span class="muted">v'+(x.latestVersion||0)+' · ID '+x.id+'</span></li>');list('#campaigns',ca.rows,x=>'<li><strong>'+x.name+'</strong><br><span class="muted">'+x.status+' · audiencia '+(x.audienceId||'—')+' · versión '+(x.templateVersionId||'—')+'</span></li>');notice.textContent='Datos actualizados.'}catch(e){notice.textContent=e.message}}
+  function form(id,path){document.querySelector(id).addEventListener('submit',async e=>{e.preventDefault();const values=Object.fromEntries(new FormData(e.target));for(const k of ['clientId','audienceId','templateVersionId','sesAccountId'])if(values[k])values[k]=Number(values[k]);try{await api(path,{method:'POST',body:JSON.stringify(values)});e.target.reset();notice.textContent='Guardado.';load()}catch(err){notice.textContent=err.message}})}form('#clientForm','/api/platform/clients');form('#audienceForm','/api/platform/audiences');form('#templateForm','/api/platform/templates');form('#campaignForm','/api/platform/campaigns');load();
+  </script></body></html>`;
+}
+
 async function handleAdminLogin(request, response) {
   const form = await readFormBody(request);
   const username = String(form.username || "");
@@ -812,6 +837,268 @@ async function handleExport(request, response) {
   }
 }
 
+function platformBaseUrl() {
+  return String(process.env.EMAIL_TRACKING_BASE_URL || `http://${host}:${port}`).replace(/\/$/, "");
+}
+
+function createRecipientToken() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+async function getCampaignForDelivery(accountId, campaignId) {
+  const [rows] = await pool.execute(`SELECT c.*, v.html, v.subject AS templateSubject, v.preheader AS templatePreheader,
+    s.aws_region AS awsRegion, s.access_key_encrypted AS accessKeyEncrypted, s.secret_key_encrypted AS secretKeyEncrypted,
+    s.default_from_name AS defaultFromName, s.default_from_email AS defaultFromEmail, s.default_reply_to AS defaultReplyTo
+    FROM campaigns c
+    LEFT JOIN template_versions v ON v.id = c.template_version_id
+    LEFT JOIN ses_accounts s ON s.id = c.ses_account_id
+    WHERE c.id = ? AND c.account_id = ? LIMIT 1`, [campaignId, accountId]);
+  if (!rows[0]) throw new Error("campaign not found for account");
+  return rows[0];
+}
+
+function assertDeliveryReady(campaign) {
+  if (!campaign.ses_account_id || !campaign.awsRegion || !campaign.accessKeyEncrypted) throw new Error("campaign requires an active SES account");
+  if (!campaign.template_version_id || !campaign.html) throw new Error("campaign requires a template version");
+  if (!campaign.audience_id) throw new Error("campaign requires an audience");
+}
+
+async function snapshotCampaignRecipients(accountId, campaignId) {
+  const campaign = await getCampaignForDelivery(accountId, campaignId);
+  assertDeliveryReady(campaign);
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+    const [contacts] = await connection.execute("SELECT id, email FROM audience_contacts WHERE audience_id = ? AND status = 'active' ORDER BY id", [campaign.audience_id]);
+    for (const contact of contacts) {
+      const [existing] = await connection.execute("SELECT id FROM campaign_recipients WHERE campaign_id = ? AND email = ? LIMIT 1", [campaignId, contact.email]);
+      if (existing[0]) continue;
+      const token = createRecipientToken();
+      const [link] = await connection.execute("INSERT INTO email_tracking_links (token, email, campaign, campaign_id, asset_path) VALUES (?, ?, ?, ?, ?)", [token, contact.email, campaign.name, campaignId, defaultAssetPath]);
+      await connection.execute("INSERT IGNORE INTO campaign_recipients (campaign_id, audience_contact_id, tracking_link_id, email, tracking_token, status) VALUES (?, ?, ?, ?, ?, 'pending')", [campaignId, contact.id, link.insertId, contact.email, token]);
+    }
+    await connection.commit();
+  } catch (error) { await connection.rollback(); throw error; } finally { connection.release(); }
+  const [[summary]] = await pool.execute("SELECT COUNT(*) AS total FROM campaign_recipients WHERE campaign_id = ?", [campaignId]);
+  return { campaign, total: Number(summary.total) };
+}
+
+async function sendCampaignTests(accountId, campaignId, body) {
+  const campaign = await getCampaignForDelivery(accountId, campaignId);
+  assertDeliveryReady(campaign);
+  const emails = [...new Set((Array.isArray(body.emails) ? body.emails : []).map((email) => String(email || "").trim().toLowerCase()).filter(Boolean))];
+  if (!emails.length) throw new Error("at least one test email is required");
+  const results = [];
+  for (const email of emails) {
+    const token = createRecipientToken();
+    let linkId = null;
+    try {
+      const [link] = await pool.execute("INSERT INTO email_tracking_links (token, email, campaign, campaign_id, asset_path) VALUES (?, ?, ?, ?, ?)", [token, email, campaign.name, campaignId, defaultAssetPath]);
+      linkId = link.insertId;
+      const html = renderTemplate(campaign.html, { email, campaign_name: campaign.name, preheader: campaign.preheader || campaign.templatePreheader || "", tracking_image_url: `${platformBaseUrl()}/api/email-tracking/image?token=${token}`, tracking_pixel_url: `${platformBaseUrl()}/api/email-tracking/open.gif?token=${token}` });
+      const providerMessageId = await sendWithSes({ profile: campaign, encryptionKey: platformEncryptionKey, to: email, subject: campaign.subject || campaign.templateSubject, html, replyTo: campaign.reply_to || campaign.defaultReplyTo });
+      await pool.execute("INSERT INTO campaign_tests (campaign_id, email, tracking_link_id, status, provider_message_id, sent_at) VALUES (?, ?, ?, 'sent', ?, CURRENT_TIMESTAMP)", [campaignId, email, linkId, providerMessageId]);
+      results.push({ email, status: "sent", providerMessageId });
+    } catch (error) {
+      await pool.execute("INSERT INTO campaign_tests (campaign_id, email, tracking_link_id, status, last_error) VALUES (?, ?, ?, 'failed', ?)", [campaignId, email, linkId, String(error.message || error).slice(0, 4000)]);
+      results.push({ email, status: "failed", error: String(error.message || error) });
+    }
+  }
+  if (results.some((result) => result.status === "sent")) await pool.execute("UPDATE campaigns SET status = 'test_sent', test_sent_at = CURRENT_TIMESTAMP WHERE id = ? AND status IN ('draft', 'test_ready', 'test_sent')", [campaignId]);
+  return results;
+}
+
+async function approveCampaign(accountId, campaignId, approvedBy) {
+  const campaign = await getCampaignForDelivery(accountId, campaignId);
+  const [[test]] = await pool.execute("SELECT id FROM campaign_tests WHERE campaign_id = ? AND status = 'sent' LIMIT 1", [campaignId]);
+  if (!test) throw new Error("a successful test send is required before approval");
+  if (campaign.status !== "test_sent") throw new Error("campaign is not ready for approval");
+  await pool.execute("INSERT INTO campaign_approvals (campaign_id, approved_by) VALUES (?, ?) ON DUPLICATE KEY UPDATE approved_by = VALUES(approved_by), approved_at = CURRENT_TIMESTAMP", [campaignId, approvedBy || null]);
+  await pool.execute("UPDATE campaigns SET status = 'approved', approved_at = CURRENT_TIMESTAMP, approved_by = ? WHERE id = ?", [approvedBy || null, campaignId]);
+}
+
+async function createCampaignJob(accountId, campaignId, body) {
+  const campaign = await getCampaignForDelivery(accountId, campaignId);
+  if (campaign.status !== "approved") throw new Error("campaign must be approved before mass sending");
+  const snapshot = await snapshotCampaignRecipients(accountId, campaignId);
+  if (!snapshot.total) throw new Error("campaign audience has no active contacts");
+  const scheduledAt = body.scheduledAt ? new Date(body.scheduledAt) : null;
+  if (scheduledAt && Number.isNaN(scheduledAt.getTime())) throw new Error("scheduledAt must be a valid ISO date");
+  const rate = Math.min(Math.max(Number(body.ratePerSecond) || 1, 1), 100);
+  const batch = Math.min(Math.max(Number(body.batchSize) || 10, 1), 100);
+  const status = scheduledAt && scheduledAt.getTime() > Date.now() ? "scheduled" : "sending";
+  const [result] = await pool.execute("INSERT INTO send_jobs (campaign_id, status, total, pending, rate_per_second, batch_size) VALUES (?, 'queued', ?, ?, ?, ?)", [campaignId, snapshot.total, snapshot.total, rate, batch]);
+  await pool.execute("UPDATE campaigns SET status = ?, scheduled_at = ? WHERE id = ?", [status, scheduledAt ? scheduledAt.toISOString().slice(0, 19).replace("T", " ") : null, campaignId]);
+  return { id: result.insertId, status: "queued", total: snapshot.total };
+}
+
+async function getCampaignResults(accountId, campaignId) {
+  await getCampaignForDelivery(accountId, campaignId);
+  const [[row]] = await pool.execute(`SELECT
+    COUNT(r.id) AS recipients, SUM(r.status = 'sent') AS sent, SUM(r.status = 'failed') AS failed,
+    SUM(r.status IN ('pending', 'queued', 'sending')) AS pending, COUNT(l.id) AS trackingLinks,
+    SUM(l.open_count) AS opens, SUM(l.open_count > 0) AS openedContacts,
+    MIN(l.last_opened_at) AS firstOpenedAt, MAX(l.last_opened_at) AS lastOpenedAt
+    FROM campaign_recipients r LEFT JOIN email_tracking_links l ON l.id = r.tracking_link_id WHERE r.campaign_id = ?`, [campaignId]);
+  const recipients = Number(row.recipients || 0);
+  return { ...row, recipients, sent: Number(row.sent || 0), failed: Number(row.failed || 0), pending: Number(row.pending || 0), opens: Number(row.opens || 0), openedContacts: Number(row.openedContacts || 0), openRate: recipients ? Number(((Number(row.openedContacts || 0) / recipients) * 100).toFixed(2)) : 0 };
+}
+
+async function handlePlatformRequest(request, response, requestUrl) {
+  try {
+    const account = await getPlatformAccount();
+    const clientId = requestUrl.searchParams.get("clientId") || undefined;
+    const pathName = requestUrl.pathname;
+
+    if (request.method === "GET" && pathName === "/api/platform/account") {
+      return sendJson(response, 200, { ok: true, account });
+    }
+    if (request.method === "GET" && pathName === "/api/platform/clients") {
+      return sendJson(response, 200, { ok: true, rows: await platformRepository.listClients(account.id) });
+    }
+    if (request.method === "POST" && pathName === "/api/platform/clients") {
+      return sendJson(response, 201, { ok: true, client: await platformRepository.createClient(account.id, await readJsonBody(request)) });
+    }
+    const clientMatch = pathName.match(/^\/api\/platform\/clients\/(\d+)$/);
+    if (request.method === "PATCH" && clientMatch) {
+      return sendJson(response, 200, { ok: true, client: await platformRepository.updateClient(account.id, Number(clientMatch[1]), await readJsonBody(request)) });
+    }
+    if (request.method === "GET" && pathName === "/api/platform/campaigns") {
+      return sendJson(response, 200, { ok: true, rows: await platformRepository.listCampaigns(account.id, clientId) });
+    }
+    if (request.method === "POST" && pathName === "/api/platform/campaigns") {
+      return sendJson(response, 201, { ok: true, campaign: await platformRepository.createCampaign(account.id, await readJsonBody(request)) });
+    }
+    const campaignAction = pathName.match(/^\/api\/platform\/campaigns\/(\d+)\/(recipients|tests|approve|send|results)$/);
+    if (campaignAction) {
+      const campaignId = Number(campaignAction[1]);
+      const action = campaignAction[2];
+      if (request.method === "POST" && action === "recipients") return sendJson(response, 201, { ok: true, ...await snapshotCampaignRecipients(account.id, campaignId) });
+      if (request.method === "POST" && action === "tests") return sendJson(response, 200, { ok: true, rows: await sendCampaignTests(account.id, campaignId, await readJsonBody(request)) });
+      if (request.method === "POST" && action === "approve") { const body = await readJsonBody(request); await approveCampaign(account.id, campaignId, body.approvedBy); return sendJson(response, 200, { ok: true }); }
+      if (request.method === "POST" && action === "send") return sendJson(response, 201, { ok: true, job: await createCampaignJob(account.id, campaignId, await readJsonBody(request)) });
+      if (request.method === "GET" && action === "results") return sendJson(response, 200, { ok: true, results: await getCampaignResults(account.id, campaignId) });
+    }
+    const previewMatch = pathName.match(/^\/api\/platform\/campaigns\/(\d+)\/preview$/);
+    if (request.method === "GET" && previewMatch) {
+      const campaign = await getCampaignForDelivery(account.id, Number(previewMatch[1]));
+      if (!campaign.html) throw new Error("campaign requires a template version for preview");
+      const email = String(requestUrl.searchParams.get("email") || "preview@example.test");
+      const token = "preview-token";
+      const html = renderTemplate(campaign.html, { email, campaign_name: campaign.name, preheader: campaign.preheader || campaign.templatePreheader || "", tracking_image_url: `${platformBaseUrl()}/api/email-tracking/image?token=${token}`, tracking_pixel_url: `${platformBaseUrl()}/api/email-tracking/open.gif?token=${token}` });
+      return sendJson(response, 200, { ok: true, subject: campaign.subject || campaign.templateSubject, preheader: campaign.preheader || campaign.templatePreheader, html });
+    }
+    const campaignMatch = pathName.match(/^\/api\/platform\/campaigns\/(\d+)\/status$/);
+    if (request.method === "PATCH" && campaignMatch) {
+      const body = await readJsonBody(request);
+      return sendJson(response, 200, { ok: true, campaign: await platformRepository.transitionCampaign(account.id, Number(campaignMatch[1]), body.status) });
+    }
+    if (request.method === "GET" && pathName === "/api/platform/audiences") {
+      return sendJson(response, 200, { ok: true, rows: await platformRepository.listAudiences(account.id, clientId) });
+    }
+    if (request.method === "POST" && pathName === "/api/platform/audiences") {
+      return sendJson(response, 201, { ok: true, audience: await platformRepository.createAudience(account.id, await readJsonBody(request)) });
+    }
+    const audienceMatch = pathName.match(/^\/api\/platform\/audiences\/(\d+)$/);
+    if (request.method === "DELETE" && audienceMatch) {
+      await platformRepository.deleteAudience(account.id, Number(audienceMatch[1]));
+      response.writeHead(204); response.end(); return;
+    }
+    const audienceImport = pathName.match(/^\/api\/platform\/audiences\/(\d+)\/contacts\/import$/);
+    if (request.method === "POST" && audienceImport) {
+      const body = await readJsonBody(request);
+      return sendJson(response, 200, { ok: true, ...await platformRepository.importAudienceContacts(account.id, Number(audienceImport[1]), body.csv) });
+    }
+    const audienceContactsMatch = pathName.match(/^\/api\/platform\/audiences\/(\d+)\/contacts$/);
+    if (request.method === "GET" && audienceContactsMatch) {
+      const [rows] = await pool.execute("SELECT ac.id, ac.email, ac.name, ac.status, ac.metadata_json AS metadataJson, ac.created_at AS createdAt FROM audience_contacts ac JOIN audiences a ON a.id = ac.audience_id WHERE ac.audience_id = ? AND a.account_id = ? ORDER BY ac.id DESC LIMIT 500", [Number(audienceContactsMatch[1]), account.id]);
+      return sendJson(response, 200, { ok: true, rows });
+    }
+    if (request.method === "GET" && pathName === "/api/platform/templates") {
+      return sendJson(response, 200, { ok: true, rows: await platformRepository.listTemplates(account.id, clientId) });
+    }
+    if (request.method === "POST" && pathName === "/api/platform/templates") {
+      return sendJson(response, 201, { ok: true, template: await platformRepository.createTemplate(account.id, await readJsonBody(request)) });
+    }
+    const templateVersionMatch = pathName.match(/^\/api\/platform\/templates\/(\d+)\/versions$/);
+    if (request.method === "POST" && templateVersionMatch) {
+      return sendJson(response, 201, { ok: true, templateVersion: await platformRepository.addTemplateVersion(account.id, Number(templateVersionMatch[1]), await readJsonBody(request)) });
+    }
+    if (request.method === "GET" && templateVersionMatch) {
+      const [rows] = await pool.execute("SELECT v.id, v.version, v.subject, v.preheader, v.source_type AS sourceType, v.created_at AS createdAt FROM template_versions v JOIN templates t ON t.id = v.template_id WHERE v.template_id = ? AND t.account_id = ? ORDER BY v.version DESC", [Number(templateVersionMatch[1]), account.id]);
+      return sendJson(response, 200, { ok: true, rows });
+    }
+    const templateAiMatch = pathName.match(/^\/api\/platform\/templates\/(\d+)\/ai$/);
+    if (request.method === "POST" && templateAiMatch) {
+      const templateId = Number(templateAiMatch[1]);
+      const body = await readJsonBody(request);
+      const [[current]] = await pool.execute("SELECT t.client_id AS clientId, v.html, v.subject, v.preheader FROM templates t JOIN template_versions v ON v.template_id = t.id WHERE t.id = ? AND t.account_id = ? ORDER BY v.version DESC LIMIT 1", [templateId, account.id]);
+      if (!current) throw new Error("template not found for account");
+      const [assets] = await pool.execute("SELECT name, public_url AS publicUrl FROM assets WHERE account_id = ? AND client_id = ? ORDER BY created_at DESC", [account.id, current.clientId]);
+      const draft = await reviseTemplateWithAi({ apiKey: process.env.OPENAI_API_KEY, model: process.env.OPENAI_TEMPLATE_MODEL || "gpt-5", instruction: body.instruction, html: current.html, subject: current.subject, preheader: current.preheader, assets });
+      return sendJson(response, 201, { ok: true, templateVersion: await platformRepository.addTemplateVersion(account.id, templateId, { ...draft, sourceType: "ai", createdBy: body.createdBy }) });
+    }
+    const templateCloneMatch = pathName.match(/^\/api\/platform\/templates\/(\d+)\/clone$/);
+    if (request.method === "POST" && templateCloneMatch) {
+      const body = await readJsonBody(request);
+      const [[source]] = await pool.execute("SELECT t.client_id AS clientId, t.description, v.html, v.subject, v.preheader FROM templates t JOIN template_versions v ON v.template_id = t.id WHERE t.id = ? AND t.account_id = ? ORDER BY v.version DESC LIMIT 1", [Number(templateCloneMatch[1]), account.id]);
+      if (!source) throw new Error("template not found for account");
+      return sendJson(response, 201, { ok: true, template: await platformRepository.createTemplate(account.id, { ...source, name: body.name, clientId: body.clientId || source.clientId, sourceType: "clone", createdBy: body.createdBy }) });
+    }
+    if (request.method === "GET" && pathName === "/api/platform/assets") {
+      const [rows] = await pool.execute("SELECT id, client_id AS clientId, campaign_id AS campaignId, name, original_filename AS originalFilename, public_url AS publicUrl, mime_type AS mimeType, size, width, height, created_at AS createdAt FROM assets WHERE account_id = ? ORDER BY created_at DESC", [account.id]);
+      return sendJson(response, 200, { ok: true, rows });
+    }
+    if (request.method === "POST" && pathName === "/api/platform/assets") {
+      const body = await readJsonBody(request);
+      const clientId = Number(body.clientId);
+      if (!Number.isSafeInteger(clientId) || !body.filename || !body.base64 || !body.mimeType) throw new Error("clientId, filename, mimeType and base64 are required");
+      const [clients] = await pool.execute("SELECT id FROM clients WHERE id = ? AND account_id = ?", [clientId, account.id]);
+      if (!clients[0]) throw new Error("client not found for account");
+      const buffer = Buffer.from(String(body.base64).replace(/^data:[^;]+;base64,/, ""), "base64");
+      if (!buffer.length || buffer.length > 15 * 1024 * 1024) throw new Error("asset must be between 1 byte and 15 MB");
+      const bucket = process.env.ASSET_S3_BUCKET;
+      const region = process.env.ASSET_S3_REGION;
+      if (!bucket || !region || !process.env.ASSET_S3_ACCESS_KEY || !process.env.ASSET_S3_SECRET_KEY) throw new Error("S3 asset configuration is incomplete");
+      const safeName = String(body.filename).replace(/[^a-zA-Z0-9._-]/g, "-");
+      const key = `clients/${clientId}/${crypto.randomUUID()}-${safeName}`;
+      const publicUrl = await uploadAssetToS3({ region, bucket, accessKeyId: process.env.ASSET_S3_ACCESS_KEY, secretAccessKey: process.env.ASSET_S3_SECRET_KEY, key, body: buffer, mimeType: String(body.mimeType) });
+      const campaignId = body.campaignId ? Number(body.campaignId) : null;
+      const [result] = await pool.execute("INSERT INTO assets (account_id, client_id, campaign_id, name, original_filename, s3_key, public_url, mime_type, size, width, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [account.id, clientId, campaignId, String(body.name || body.filename).slice(0, 160), safeName, key, publicUrl, String(body.mimeType).slice(0, 120), buffer.length, Number(body.width) || null, Number(body.height) || null]);
+      return sendJson(response, 201, { ok: true, asset: { id: result.insertId, publicUrl } });
+    }
+    if (request.method === "GET" && pathName === "/api/platform/ses-accounts") {
+      const [rows] = await pool.execute("SELECT id, client_id AS clientId, name, aws_region AS awsRegion, default_from_name AS defaultFromName, default_from_email AS defaultFromEmail, default_reply_to AS defaultReplyTo, status, created_at AS createdAt FROM ses_accounts WHERE account_id = ? ORDER BY name", [account.id]);
+      return sendJson(response, 200, { ok: true, rows });
+    }
+    if (request.method === "POST" && pathName === "/api/platform/ses-accounts") {
+      const body = await readJsonBody(request);
+      const clientId = Number(body.clientId);
+      if (!Number.isSafeInteger(clientId) || clientId < 1 || !body.name || !body.awsRegion || !body.accessKey || !body.secretKey || !body.fromEmail) throw new Error("clientId, name, awsRegion, accessKey, secretKey and fromEmail are required");
+      const [clients] = await pool.execute("SELECT id FROM clients WHERE id = ? AND account_id = ?", [clientId, account.id]);
+      if (!clients[0]) throw new Error("client not found for account");
+      const [result] = await pool.execute("INSERT INTO ses_accounts (account_id, client_id, name, aws_region, access_key_encrypted, secret_key_encrypted, default_from_name, default_from_email, default_reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [account.id, clientId, String(body.name).slice(0, 160), String(body.awsRegion).slice(0, 40), encryptSecret(body.accessKey, platformEncryptionKey), encryptSecret(body.secretKey, platformEncryptionKey), String(body.fromName || "").slice(0, 160) || null, String(body.fromEmail).slice(0, 255), String(body.replyTo || "").slice(0, 255) || null]);
+      return sendJson(response, 201, { ok: true, sesAccount: { id: result.insertId } });
+    }
+    const jobAction = pathName.match(/^\/api\/platform\/send-jobs\/(\d+)(?:\/(pause|resume))?$/);
+    if (jobAction) {
+      const jobId = Number(jobAction[1]);
+      if (request.method === "GET" && !jobAction[2]) {
+        const [rows] = await pool.execute("SELECT id, campaign_id AS campaignId, status, total, processed, sent, failed, pending, started_at AS startedAt, finished_at AS finishedAt, last_activity_at AS lastActivity FROM send_jobs WHERE id = ?", [jobId]);
+        if (!rows[0]) throw new Error("send job not found");
+        return sendJson(response, 200, { ok: true, job: { ...rows[0], percentage: rows[0].total ? Number(((rows[0].processed / rows[0].total) * 100).toFixed(2)) : 0 } });
+      }
+      if (request.method === "POST" && jobAction[2] === "pause") { await pool.execute("UPDATE send_jobs SET status = 'paused' WHERE id = ? AND status IN ('queued', 'running')", [jobId]); await pool.execute("UPDATE campaigns c JOIN send_jobs j ON j.campaign_id = c.id SET c.status = 'paused' WHERE j.id = ?", [jobId]); return sendJson(response, 200, { ok: true }); }
+      if (request.method === "POST" && jobAction[2] === "resume") { await pool.execute("UPDATE send_jobs SET status = 'queued' WHERE id = ? AND status = 'paused'", [jobId]); await pool.execute("UPDATE campaigns c JOIN send_jobs j ON j.campaign_id = c.id SET c.status = 'sending' WHERE j.id = ?", [jobId]); return sendJson(response, 200, { ok: true }); }
+    }
+    return sendJson(response, 404, { ok: false, error: "not found" });
+  } catch (error) {
+    console.error("platform request error", error);
+    const isClientError = /is required|not found|must include|does not exist/.test(String(error.message));
+    return sendJson(response, isClientError ? 400 : 500, { ok: false, error: isClientError ? error.message : "internal server error" });
+  }
+}
+
 const server = http.createServer(async (request, response) => {
   if (!request.url) {
     response.writeHead(400);
@@ -858,12 +1145,26 @@ const server = http.createServer(async (request, response) => {
     return sendHtml(response, 200, renderAdminPage());
   }
 
+  if (request.method === "GET" && requestUrl.pathname === "/platform") {
+    if (!requireAdmin(request, response)) {
+      return;
+    }
+    return sendHtml(response, 200, renderPlatformPage());
+  }
+
   if (request.method === "GET" && requestUrl.pathname === "/api/admin/links") {
     if (!requireAdmin(request, response)) {
       return;
     }
 
     return handleAdminLinks(request, response);
+  }
+
+  if (requestUrl.pathname.startsWith("/api/platform/")) {
+    if (!requireAdmin(request, response)) {
+      return;
+    }
+    return handlePlatformRequest(request, response, requestUrl);
   }
 
   const eventsMatch = requestUrl.pathname.match(/^\/api\/admin\/links\/(\d+)\/events$/);

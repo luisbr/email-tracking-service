@@ -24,7 +24,17 @@ npm install
 cp .env.example .env
 mysql -u root -p -e "CREATE DATABASE IF NOT EXISTS email_tracking"
 mysql -u root -p email_tracking < db/schema.sql
+mysql -u root -p email_tracking < db/migrations/001_platform_foundation.sql
+mysql -u root -p email_tracking < db/migrations/002_delivery_and_assets.sql
 npm run dev
+```
+
+La evolucion hacia la plataforma de campanas y la migracion compatible estan documentadas en [PLATFORM-MIGRATION-PLAN.md](docs/PLATFORM-MIGRATION-PLAN.md).
+
+Para procesar envíos en segundo plano, ejecutar en otro proceso:
+
+```bash
+npm run worker
 ```
 
 ## Crear un link manual
