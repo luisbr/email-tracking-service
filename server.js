@@ -1137,12 +1137,20 @@ const server = http.createServer(async (request, response) => {
     return;
   }
 
-  if (request.method === "GET" && requestUrl.pathname === "/admin") {
+  if (request.method === "GET" && requestUrl.pathname === "/admin/tracking") {
     if (!requireAdmin(request, response)) {
       return;
     }
 
     return sendHtml(response, 200, renderAdminPage());
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/admin") {
+    if (!requireAdmin(request, response)) {
+      return;
+    }
+
+    return sendHtml(response, 200, renderPlatformPage());
   }
 
   if (request.method === "GET" && requestUrl.pathname === "/platform") {
