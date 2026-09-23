@@ -113,9 +113,9 @@ function signSessionPayload(payload) {
   return crypto.createHmac("sha256", adminSessionSecret).update(payload).digest("base64url");
 }
 
-function createSessionCookie(username) {
+function createSessionCookie(session) {
   const expiresAt = Date.now() + 1000 * 60 * 60 * 12;
-  const payload = Buffer.from(JSON.stringify({ username, expiresAt })).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ ...session, expiresAt })).toString("base64url");
   const signature = signSessionPayload(payload);
 
   return `${sessionCookieName}=${encodeURIComponent(`${payload}.${signature}`)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=43200`;
@@ -146,6 +146,23 @@ function getAdminSession(request) {
   } catch {
     return null;
   }
+}
+
+function hashPlatformPassword(password) {
+  const salt = crypto.randomBytes(16).toString("base64url");
+  const digest = crypto.scryptSync(password, salt, 64).toString("base64url");
+  return `scrypt$${salt}$${digest}`;
+}
+
+function verifyPlatformPassword(password, passwordHash) {
+  const [scheme, salt, expected] = String(passwordHash || "").split("$");
+  if (scheme !== "scrypt" || !salt || !expected) return false;
+  const actual = crypto.scryptSync(password, salt, 64).toString("base64url");
+  return timingSafeEqualString(actual, expected);
+}
+
+function isPlatformAdmin(session) {
+  return session?.role === "admin";
 }
 
 function requireAdmin(request, response) {
@@ -518,7 +535,7 @@ async function handleTrackingImage(request, response) {
   }
 }
 
-function renderLoginPage(errorMessage = "") {
+function renderLegacyLoginPage(errorMessage = "") {
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -550,7 +567,7 @@ function renderLoginPage(errorMessage = "") {
 </html>`;
 }
 
-function renderAdminPage() {
+function renderLegacyAdminPage() {
   return `<!doctype html>
 <html lang="es">
 <head>
@@ -711,7 +728,7 @@ function renderAdminPage() {
 </html>`;
 }
 
-function renderPlatformPage() {
+function renderLegacyPlatformPage() {
   return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Email Campaign Platform</title><style>
   :root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#15211b;background:#f7f7f4}*{box-sizing:border-box}body{margin:0}.shell{display:grid;grid-template-columns:230px 1fr;min-height:100vh}.sidebar{background:#15211b;color:#edf3eb;padding:24px 16px}.brand{font-weight:800;font-size:18px;margin:0 8px 30px}.nav a{display:block;color:#cbd8cf;text-decoration:none;padding:9px 10px;border-radius:5px}.nav a:hover,.nav a.active{background:#244331;color:#fff}.content{max-width:1250px;width:100%;margin:0 auto;padding:28px}.top{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #d9ded8;padding-bottom:18px}.top h1{font-size:24px;margin:0}.top a{color:#2463a5}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:20px}.panel{background:#fff;border:1px solid #d9ded8;border-radius:7px;padding:16px}.panel h2{font-size:16px;margin:0 0 12px}.panel p{color:#5c695f;font-size:13px}.panel form{display:grid;gap:8px}.panel input,.panel select,.panel textarea{width:100%;border:1px solid #bfc8c1;border-radius:5px;padding:9px;font:inherit;background:#fff}.panel textarea{min-height:80px}button{border:0;border-radius:5px;background:#167a54;color:#fff;padding:9px 12px;font:inherit;font-weight:700;cursor:pointer}button:hover{background:#116443}.list{margin:0;padding:0;list-style:none;max-height:220px;overflow:auto}.list li{border-top:1px solid #edf0eb;padding:9px 0;font-size:13px}.muted{color:#69756d}.notice{margin-top:16px;padding:10px 12px;background:#e8f3ed;border-left:3px solid #167a54;font-size:13px}.wide{grid-column:span 3}@media(max-width:850px){.shell{grid-template-columns:1fr}.sidebar{display:flex;align-items:center;gap:16px;padding:14px}.brand{margin:0}.nav{display:flex;gap:4px}.content{padding:18px}.grid{grid-template-columns:1fr}.wide{grid-column:auto}}</style></head><body><div class="shell"><aside class="sidebar"><p class="brand">Email Campaign Platform</p><nav class="nav"><a class="active" href="/platform">Operación</a><a href="/admin">Tracking</a></nav></aside><main class="content"><div class="top"><div><h1>Operación de campañas</h1><span class="muted">Clientes, audiencias, contenido y envíos</span></div><a href="/admin">Ver tracking histórico</a></div><div id="notice" class="notice">Cargando datos de plataforma...</div><section class="grid"><article class="panel"><h2>Clientes</h2><form id="clientForm"><input name="name" placeholder="Nombre del cliente" required><button>Crear cliente</button></form><ul id="clients" class="list"></ul></article><article class="panel"><h2>Audiencias</h2><form id="audienceForm"><select name="clientId" class="clientSelect" required></select><input name="name" placeholder="Nombre de audiencia" required><button>Crear audiencia</button></form><ul id="audiences" class="list"></ul></article><article class="panel"><h2>Templates</h2><form id="templateForm"><select name="clientId" class="clientSelect" required></select><input name="name" placeholder="Nombre del template" required><input name="subject" placeholder="Subject"><textarea name="html" placeholder="HTML compatible con email" required></textarea><button>Crear template</button></form><ul id="templates" class="list"></ul></article><article class="panel wide"><h2>Nueva campaña</h2><form id="campaignForm"><select name="clientId" class="clientSelect" required></select><input name="name" placeholder="Nombre de campaña" required><input name="subject" placeholder="Subject"><input name="audienceId" type="number" placeholder="ID de audiencia"><input name="templateVersionId" type="number" placeholder="ID de versión de template"><input name="sesAccountId" type="number" placeholder="ID de perfil SES"><button>Crear campaña</button></form><ul id="campaigns" class="list"></ul></article></section></main></div><script>
   const notice=document.querySelector('#notice');document.querySelectorAll('a[href="/admin"]').forEach((link)=>link.href='/admin/tracking');let clients=[];
@@ -723,22 +740,64 @@ function renderPlatformPage() {
   </script></body></html>`;
 }
 
+function renderHululLogo(className = "brand-logo") {
+  return `<img class="${className}" src="/brand/hulul-logo.png" alt="HULUL">`;
+}
+
+function renderLoginPage(errorMessage = "") {
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Acceso | HULUL Campaigns</title><style>
+  :root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#f4f6fb;background:#0b0b12}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 86% 13%,rgba(123,77,255,.28),transparent 26%),radial-gradient(circle at 5% 92%,rgba(211,93,255,.18),transparent 24%),linear-gradient(135deg,#0b0b12,#12131c 55%,#17122b);display:grid;place-items:center;padding:28px}.login{width:min(440px,100%);position:relative}.brand{display:flex;justify-content:center;margin-bottom:35px}.brand img{width:156px;height:auto;filter:grayscale(1) brightness(6)}.tag{margin:12px 0 0;color:#b7b9cf;text-align:center;font-size:11px;letter-spacing:2px}.card{padding:34px;border-radius:20px;border:1px solid rgba(183,140,255,.42);background:linear-gradient(160deg,rgba(36,41,56,.84),rgba(18,19,28,.93));box-shadow:0 24px 70px rgba(0,0,0,.42),0 0 45px rgba(123,77,255,.14)}h1{font-size:28px;margin:0 0 8px;letter-spacing:0}p{margin:0;color:#aeb3c7;line-height:1.5}.error{margin:20px 0 0;padding:11px 13px;color:#ffd7dd;background:rgba(255,91,115,.12);border:1px solid rgba(255,91,115,.34);border-radius:9px;font-size:14px}form{display:grid;gap:18px;margin-top:28px}label{display:grid;gap:8px;color:#dfe2ef;font-size:13px;font-weight:600}input{width:100%;height:48px;border-radius:9px;border:1px solid #3c4057;background:#171925;color:#fff;padding:0 14px;font:inherit;outline:none}input:focus{border-color:#925cff;box-shadow:0 0 0 3px rgba(123,77,255,.18)}button{height:50px;border:0;border-radius:9px;background:linear-gradient(135deg,#7b4dff,#925cff);color:#fff;font:inherit;font-weight:700;font-size:15px;cursor:pointer;box-shadow:0 10px 24px rgba(123,77,255,.25)}button:hover{filter:brightness(1.1)}.footer{margin-top:22px;text-align:center;color:#777e97;font-size:12px}@media(max-width:480px){body{padding:18px}.card{padding:26px 22px}}
+  </style></head><body><main class="login"><div class="brand">${renderHululLogo()}</div><p class="tag">CAMPAIGNS · DATOS · ESTRATEGIA</p><section class="card"><h1>Accede a tu cuenta</h1><p>Gestiona campañas, audiencias y resultados desde un solo lugar.</p>${errorMessage ? `<div class="error">${escapeHtml(errorMessage)}</div>` : ""}<form method="post" action="/admin/login"><label>Usuario<input name="username" autocomplete="username" required></label><label>Contraseña<input name="password" type="password" autocomplete="current-password" required></label><button type="submit">Iniciar sesión</button></form></section><p class="footer">HULUL · Capital inteligente para un mayor mañana</p></main></body></html>`;
+}
+
+function renderPlatformPage() {
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Campañas | HULUL</title><style>
+  :root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#f4f6fb;background:#0b0b12}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 70% -10%,rgba(123,77,255,.15),transparent 36%),#0b0b12;min-height:100vh}.app{display:grid;grid-template-columns:244px 1fr;min-height:100vh}.side{position:sticky;top:0;height:100vh;padding:26px 14px;border-right:1px solid rgba(255,255,255,.07);background:rgba(13,14,23,.9)}.side .brand{display:block;width:112px;height:auto;margin:0 12px 34px;filter:grayscale(1) brightness(6)}.nav{display:grid;gap:4px}.nav-label{display:block;margin:17px 12px 6px;color:#777e97;font-size:10px;font-weight:700;letter-spacing:1.3px}.nav-label:first-child{margin-top:0}.nav button{display:flex;align-items:center;width:100%;height:42px;padding:0 13px;border:0;border-radius:8px;background:transparent;color:#9da4b9;text-align:left;font:inherit;cursor:pointer}.nav button:hover,.nav button.active{color:#fff;background:rgba(123,77,255,.17);box-shadow:inset 2px 0 #925cff}.nav .tracking{margin-top:18px;border-top:1px solid rgba(255,255,255,.08);padding-top:18px}.account{position:absolute;bottom:22px;left:26px;color:#777e97;font-size:12px}.main{padding:32px min(5vw,70px);max-width:1550px;width:100%;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:30px}.top h1{margin:0;font-size:28px;letter-spacing:0}.top p{margin:7px 0 0;color:#9da4b9}.primary{height:42px;border:0;border-radius:8px;padding:0 16px;background:linear-gradient(135deg,#7b4dff,#925cff);color:white;font:inherit;font-weight:700;cursor:pointer;box-shadow:0 10px 26px rgba(123,77,255,.22)}.primary:hover{filter:brightness(1.1)}.overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.metric,.panel{border:1px solid rgba(255,255,255,.08);background:linear-gradient(145deg,rgba(36,41,56,.8),rgba(18,19,28,.88));border-radius:14px}.metric{padding:18px}.metric span{display:block;color:#a3a9be;font-size:13px}.metric strong{display:block;font-size:27px;margin-top:10px}.metric small{display:block;margin-top:8px;color:#29c77a}.workspace{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,.75fr);gap:16px;margin-top:18px}.panel{padding:20px}.panel h2{margin:0;font-size:17px}.panel>p{margin:7px 0 18px;color:#9da4b9;font-size:14px}.empty{padding:44px 8px;text-align:center;color:#a3a9be}.empty strong{display:block;color:#f4f6fb;font-size:16px;margin-bottom:6px}.activity{display:grid;gap:14px}.activity div{padding-bottom:14px;border-bottom:1px solid rgba(255,255,255,.07)}.activity div:last-child{border:0;padding:0}.activity b{display:block;font-size:14px}.activity span{display:block;color:#9da4b9;font-size:12px;margin-top:5px}.view{display:none}.view.active{display:block}.form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}.form-grid .full{grid-column:1/-1}label{display:grid;gap:7px;color:#d7daea;font-size:13px;font-weight:600}input,select,textarea{min-height:43px;border:1px solid #34394f;border-radius:8px;background:#151824;color:#f4f6fb;padding:10px 12px;font:inherit;outline:0}textarea{min-height:135px;resize:vertical}input:focus,select:focus,textarea:focus{border-color:#925cff;box-shadow:0 0 0 3px rgba(123,77,255,.16)}.table{width:100%;border-collapse:collapse;margin-top:18px}.table th,.table td{padding:12px 8px;border-bottom:1px solid rgba(255,255,255,.07);text-align:left;font-size:13px}.table th{color:#8c92a8;font-weight:600}.badge{display:inline-block;padding:4px 8px;border-radius:99px;background:rgba(123,77,255,.16);color:#c8b5ff;font-size:12px}.notice{min-height:20px;color:#29c77a;font-size:13px}.secondary{background:#222634;border:1px solid #3a4054;color:#e9ecf7;box-shadow:none}.secondary:hover{background:#2c3141}.form-actions{display:flex;gap:10px;align-items:center;margin-top:6px}@media(max-width:920px){.app{grid-template-columns:1fr}.side{position:static;height:auto;display:flex;align-items:center;gap:16px;padding:16px}.side .brand{margin:0;width:88px}.nav{display:flex;overflow:auto;flex:1}.nav-label{display:none}.nav button{width:auto;white-space:nowrap}.nav .tracking{margin:0;padding:0;border:0}.account{display:none}.main{padding:24px 18px}.overview,.workspace{grid-template-columns:1fr 1fr}.workspace .panel:first-child{grid-column:span 2}}@media(max-width:600px){.top{align-items:flex-start;flex-direction:column}.overview,.workspace{grid-template-columns:1fr}.workspace .panel:first-child{grid-column:auto}.form-grid{grid-template-columns:1fr}}
+  </style></head><body><div class="app"><aside class="side">${renderHululLogo("brand")}<nav class="nav"><button class="active" data-view="overview">Resumen</button><button data-view="campaigns">Campañas</button><button data-view="audiences">Audiencias</button><button data-view="templates">Templates</button><button data-view="assets">Assets</button><button data-view="settings">Configuración SES</button><button class="tracking" data-view="tracking">Tracking</button></nav><span class="account">HULUL Campaigns</span></aside><main class="main"><header class="top"><div><h1 id="pageTitle">Resumen</h1><p id="pageCopy">Estado operativo de tus campañas.</p></div><button class="primary" id="newAction">Crear campaña</button></header><div id="notice" class="notice"></div>
+  <section class="view active" id="overview"><div class="overview"><article class="metric"><span>Campañas</span><strong id="campaignCount">—</strong><small>En tu cuenta</small></article><article class="metric"><span>Audiencias</span><strong id="audienceCount">—</strong><small>Listas para usar</small></article><article class="metric"><span>Templates</span><strong id="templateCount">—</strong><small>Contenido versionado</small></article><article class="metric"><span>Destinatarios</span><strong id="contactCount">—</strong><small>Contactos activos</small></article></div><div class="workspace"><article class="panel"><h2>Campañas recientes</h2><p>Lo que está listo para revisar o enviar.</p><div id="recentCampaigns" class="empty"><strong>Aún no hay campañas</strong>Crea una campaña cuando ya tengas audiencia y template.</div></article><aside class="panel"><h2>Siguiente paso</h2><p>Prepara el flujo en este orden.</p><div class="activity"><div><b>1. Crea un cliente</b><span>Define la marca que envía.</span></div><div><b>2. Importa una audiencia</b><span>La base queda guardada y reutilizable.</span></div><div><b>3. Versiona el contenido</b><span>Conecta un template a tu campaña.</span></div></div></aside></div></section>
+  <section class="view" id="campaigns"><article class="panel"><h2>Nueva campaña</h2><p>Una campaña reúne audiencia, contenido y perfil de envío.</p><form id="campaignForm" class="form-grid"><label>Cliente<select name="clientId" class="clientSelect" required></select></label><label>Nombre<input name="name" required placeholder="Ej. Lanzamiento octubre"></label><label>Asunto<input name="subject" placeholder="Asunto del correo"></label><label>Audiencia<select name="audienceId" id="audienceSelect"><option value="">Seleccionar después</option></select></label><label>Versión de template<input name="templateVersionId" type="number" placeholder="ID de versión"></label><label>Perfil SES<input name="sesAccountId" type="number" placeholder="ID de perfil"></label><div class="full form-actions"><button class="primary">Crear campaña</button></div></form><table class="table"><thead><tr><th>Campaña</th><th>Cliente</th><th>Estado</th><th>Audiencia</th></tr></thead><tbody id="campaignRows"></tbody></table></article></section>
+  <section class="view" id="audiences"><article class="panel"><h2>Crear audiencia</h2><p>Importa posteriormente sus contactos mediante CSV desde la API.</p><form id="audienceForm" class="form-grid"><label>Cliente<select name="clientId" class="clientSelect" required></select></label><label>Nombre<input name="name" required placeholder="Ej. Leads activos"></label><label class="full">Descripción<input name="description" placeholder="Uso y procedencia de la audiencia"></label><div class="full form-actions"><button class="primary">Crear audiencia</button></div></form><table class="table"><thead><tr><th>Audiencia</th><th>Cliente</th><th>Contactos</th></tr></thead><tbody id="audienceRows"></tbody></table></article></section>
+  <section class="view" id="templates"><article class="panel"><h2>Crear template</h2><p>Cada contenido inicia como versión 1 y se conserva como historial.</p><form id="templateForm" class="form-grid"><label>Cliente<select name="clientId" class="clientSelect" required></select></label><label>Nombre<input name="name" required placeholder="Ej. Newsletter mensual"></label><label class="full">Asunto<input name="subject" placeholder="Asunto predeterminado"></label><label class="full">HTML<textarea name="html" required placeholder="Pega HTML compatible con correo"></textarea></label><div class="full form-actions"><button class="primary">Crear template</button></div></form><table class="table"><thead><tr><th>Template</th><th>Cliente</th><th>Última versión</th></tr></thead><tbody id="templateRows"></tbody></table></article></section>
+  <section class="view" id="assets"><article class="panel"><h2>Assets</h2><p>Los assets se guardan por cliente y pueden asociarse a una campaña.</p><div id="assetList" class="empty"><strong>Sin assets</strong>Configura S3 para subir imágenes.</div></article></section>
+  <section class="view" id="settings"><article class="panel"><h2>Perfil Amazon SES</h2><p>Las credenciales se cifran antes de guardarse y nunca vuelven a mostrarse.</p><form id="sesForm" class="form-grid"><label>Cliente<select name="clientId" class="clientSelect" required></select></label><label>Nombre<input name="name" required placeholder="SES producción"></label><label>Región AWS<input name="awsRegion" required placeholder="us-east-1"></label><label>From email<input name="fromEmail" type="email" required></label><label>Access key<input name="accessKey" required></label><label>Secret key<input name="secretKey" type="password" required></label><label>From name<input name="fromName"></label><label>Reply-to<input name="replyTo" type="email"></label><div class="full form-actions"><button class="primary">Guardar perfil SES</button></div></form></article></section>
+  <section class="view" id="tracking"><article class="panel"><h2>Tracking histórico</h2><p>Consulta el historial completo de aperturas y exporta el detalle desde la vista dedicada.</p><div class="form-actions"><a class="primary" href="/admin/tracking" style="text-decoration:none;display:inline-flex;align-items:center">Abrir tracking</a></div></article></section>
+  </main></div><script>
+  const nav=document.querySelector('.nav');const operationLabel=document.createElement('span');operationLabel.className='nav-label';operationLabel.textContent='OPERACIÓN';nav.prepend(operationLabel);const catalogsLabel=document.createElement('span');catalogsLabel.className='nav-label';catalogsLabel.textContent='CATÁLOGOS';nav.querySelector('[data-view="audiences"]').before(catalogsLabel);const reportsLabel=document.createElement('span');reportsLabel.className='nav-label';reportsLabel.textContent='REPORTES';nav.querySelector('[data-view="tracking"]').before(reportsLabel);const state={clients:[],audiences:[],templates:[],campaigns:[]};const titles={overview:['Resumen','Estado operativo de tus campañas.'],campaigns:['Campañas','Planea, aprueba y da seguimiento a cada envío.'],audiences:['Audiencias','Bases reutilizables, limpias y listas para enviar.'],templates:['Templates','Contenido versionado que protege tu historial.'],assets:['Assets','Materiales visuales disponibles para tus campañas.'],settings:['Configuración SES','Perfiles de envío seguros por cliente.'],tracking:['Tracking','Métricas históricas de apertura por destinatario.']};
+  async function api(path,options={}){const response=await fetch(path,{headers:{'Content-Type':'application/json'},...options});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||'No se pudo completar la operación');return data}function esc(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[char]))}function options(){document.querySelectorAll('.clientSelect').forEach(select=>{const v=select.value;select.innerHTML='<option value="">Selecciona un cliente</option>'+state.clients.map(c=>'<option value="'+c.id+'">'+esc(c.name)+'</option>').join('');select.value=v});const audience=document.querySelector('#audienceSelect');audience.innerHTML='<option value="">Seleccionar después</option>'+state.audiences.map(a=>'<option value="'+a.id+'">'+esc(a.name)+' ('+a.totalContacts+')</option>').join('')}function rows(){document.querySelector('#campaignRows').innerHTML=state.campaigns.map(c=>'<tr><td>'+esc(c.name)+'</td><td>'+esc(c.clientName)+'</td><td><span class="badge">'+esc(c.status)+'</span></td><td>'+esc(c.audienceId||'—')+'</td></tr>').join('')||'<tr><td colspan="4" class="empty">Sin campañas</td></tr>';document.querySelector('#audienceRows').innerHTML=state.audiences.map(a=>'<tr><td>'+esc(a.name)+'</td><td>'+esc(a.clientName)+'</td><td>'+a.totalContacts+'</td></tr>').join('')||'<tr><td colspan="3" class="empty">Sin audiencias</td></tr>';document.querySelector('#templateRows').innerHTML=state.templates.map(t=>'<tr><td>'+esc(t.name)+'</td><td>'+esc(t.clientName)+'</td><td>v'+(t.latestVersion||0)+'</td></tr>').join('')||'<tr><td colspan="3" class="empty">Sin templates</td></tr>';document.querySelector('#campaignCount').textContent=state.campaigns.length;document.querySelector('#audienceCount').textContent=state.audiences.length;document.querySelector('#templateCount').textContent=state.templates.length;document.querySelector('#contactCount').textContent=state.audiences.reduce((sum,a)=>sum+Number(a.totalContacts||0),0);document.querySelector('#recentCampaigns').innerHTML=state.campaigns.length?'<table class="table"><thead><tr><th>Campaña</th><th>Estado</th></tr></thead><tbody>'+state.campaigns.slice(0,5).map(c=>'<tr><td>'+esc(c.name)+'</td><td><span class="badge">'+esc(c.status)+'</span></td></tr>').join('')+'</tbody></table>':'<strong>Aún no hay campañas</strong><br>Crea una campaña cuando ya tengas audiencia y template.'}async function load(){try{const [clients,audiences,templates,campaigns]=await Promise.all(['/api/platform/clients','/api/platform/audiences','/api/platform/templates','/api/platform/campaigns'].map(api));Object.assign(state,{clients:clients.rows,audiences:audiences.rows,templates:templates.rows,campaigns:campaigns.rows});options();rows();document.querySelector('#notice').textContent='Datos actualizados.'}catch(error){document.querySelector('#notice').textContent=error.message}}function form(id,path){document.querySelector(id).addEventListener('submit',async event=>{event.preventDefault();const values=Object.fromEntries(new FormData(event.target));['clientId','audienceId','templateVersionId','sesAccountId'].forEach(key=>{if(values[key])values[key]=Number(values[key]);else delete values[key]});try{await api(path,{method:'POST',body:JSON.stringify(values)});event.target.reset();document.querySelector('#notice').textContent='Guardado correctamente.';await load()}catch(error){document.querySelector('#notice').textContent=error.message}})}document.querySelectorAll('.nav button').forEach(button=>button.addEventListener('click',()=>{document.querySelectorAll('.nav button,.view').forEach(element=>element.classList.remove('active'));button.classList.add('active');document.querySelector('#'+button.dataset.view).classList.add('active');const [title,copy]=titles[button.dataset.view];document.querySelector('#pageTitle').textContent=title;document.querySelector('#pageCopy').textContent=copy;document.querySelector('#newAction').textContent=button.dataset.view==='campaigns'?'Crear campaña':'Crear campaña';if(button.dataset.view==='campaigns')document.querySelector('#newAction').onclick=()=>document.querySelector('[name="name"]').focus()}));document.querySelector('#newAction').onclick=()=>{document.querySelector('[data-view="campaigns"]').click();document.querySelector('#campaignForm [name="name"]').focus()};form('#campaignForm','/api/platform/campaigns');form('#audienceForm','/api/platform/audiences');form('#templateForm','/api/platform/templates');form('#sesForm','/api/platform/ses-accounts');load();
+  </script></body></html>`;
+}
+
+function renderAdminPage() {
+  return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tracking | HULUL</title><style>:root{font-family:Inter,ui-sans-serif,system-ui,sans-serif;color:#f4f6fb;background:#0b0b12}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,rgba(123,77,255,.16),transparent 35%),#0b0b12}.top{height:72px;display:flex;align-items:center;justify-content:space-between;padding:0 5vw;border-bottom:1px solid rgba(255,255,255,.08);background:rgba(11,11,18,.84)}.logo{width:96px;filter:grayscale(1) brightness(6)}a{color:#d9c7ff;text-decoration:none}.shell{max-width:1400px;margin:auto;padding:30px 5vw}.heading{display:flex;justify-content:space-between;align-items:end;margin-bottom:24px}.heading h1{margin:0;font-size:28px}.heading p{color:#9da4b9;margin:8px 0 0}.filters{display:grid;grid-template-columns:1fr 260px auto auto;gap:10px;margin-bottom:15px}input,button,a.button{height:42px;border-radius:8px;padding:0 12px;font:inherit}input{background:#151824;border:1px solid #34394f;color:#fff}button,a.button{display:inline-flex;align-items:center;justify-content:center;border:1px solid #3d4260;background:#25293a;color:#fff;font-weight:700;cursor:pointer}.primary{background:linear-gradient(135deg,#7b4dff,#925cff);border:0}.table-wrap{overflow:auto;border:1px solid rgba(255,255,255,.08);border-radius:14px;background:rgba(22,24,36,.78)}table{width:100%;border-collapse:collapse}th,td{padding:13px;text-align:left;border-bottom:1px solid rgba(255,255,255,.07);font-size:13px}th{color:#9da4b9;font-weight:600}code{font-size:11px;color:#c9b5ff}.muted{color:#9da4b9}.empty{padding:42px;text-align:center;color:#9da4b9}.pager{display:flex;justify-content:space-between;align-items:center;margin-top:14px}@media(max-width:800px){.filters{grid-template-columns:1fr}.shell{padding:22px 16px}}</style></head><body><header class="top">${renderHululLogo("logo")}<a href="/admin">Volver a campañas</a></header><main class="shell"><div class="heading"><div><h1>Tracking</h1><p>Historial de aperturas por destinatario y campaña.</p></div><form method="post" action="/admin/logout"><button>Salir</button></form></div><form class="filters" id="filters"><input id="q" placeholder="Buscar email o token"><input id="campaign" placeholder="Filtrar campaña"><button class="primary">Aplicar filtros</button><a class="button" id="exportLink" href="/api/email-tracking/export">Exportar</a></form><p id="summary" class="muted"></p><div id="table" class="table-wrap"></div><div class="pager"><button id="prev">Anterior</button><span id="pageInfo" class="muted"></span><button id="next">Siguiente</button></div></main><script>let page=1;const limit=50,state={q:'',campaign:''};const e=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));function params(){const p=new URLSearchParams({page,limit});if(state.q)p.set('q',state.q);if(state.campaign)p.set('campaign',state.campaign);return p}async function load(){const r=await fetch('/api/admin/links?'+params());if(!r.ok){location='/admin/login';return}const d=await r.json(),pages=Math.max(1,Math.ceil(d.total/d.limit));summary.textContent=d.total+' envíos encontrados';pageInfo.textContent='Página '+d.page+' de '+pages;prev.disabled=d.page<=1;next.disabled=d.page>=pages;exportLink.href='/api/email-tracking/export?'+params();table.innerHTML=d.rows.length?'<table><thead><tr><th>Email</th><th>Campaña</th><th>Aperturas</th><th>Última apertura</th><th>Token</th></tr></thead><tbody>'+d.rows.map(row=>'<tr><td>'+e(row.email)+'</td><td>'+e(row.campaign)+'</td><td>'+Number(row.openCount||0)+'</td><td>'+e(row.lastOpenedAtText||'—')+'</td><td><code>'+e(row.token)+'</code></td></tr>').join('')+'</tbody></table>':'<div class="empty">Sin resultados</div>'}filters.addEventListener('submit',event=>{event.preventDefault();state.q=q.value.trim();state.campaign=campaign.value.trim();page=1;load()});prev.onclick=()=>{page=Math.max(1,page-1);load()};next.onclick=()=>{page+=1;load()};load();</script></body></html>`;
+}
+
 async function handleAdminLogin(request, response) {
   const form = await readFormBody(request);
   const username = String(form.username || "");
   const password = String(form.password || "");
 
-  if (
-    adminPassword &&
-    timingSafeEqualString(username, adminUsername) &&
-    timingSafeEqualString(password, adminPassword)
-  ) {
+  if (adminPassword && timingSafeEqualString(username, adminUsername) && timingSafeEqualString(password, adminPassword)) {
     response.writeHead(302, {
       Location: "/admin",
-      "Set-Cookie": createSessionCookie(username)
+      "Set-Cookie": createSessionCookie({ username, role: "admin" })
     });
     response.end();
     return;
+  }
+
+  try {
+    const [rows] = await pool.execute("SELECT id, email, password_hash AS passwordHash, role, client_id AS clientId FROM users WHERE email = ? AND status = 'active' LIMIT 1", [username]);
+    const user = rows[0];
+    if (user && verifyPlatformPassword(password, user.passwordHash)) {
+      response.writeHead(302, {
+        Location: "/admin",
+        "Set-Cookie": createSessionCookie({ username: user.email, userId: user.id, role: user.role, clientId: user.clientId || null })
+      });
+      response.end();
+      return;
+    }
+  } catch (error) {
+    console.error("platform login error", error);
   }
 
   sendHtml(response, 401, renderLoginPage("Usuario o password inválidos"));
@@ -944,34 +1003,78 @@ async function getCampaignResults(accountId, campaignId) {
   return { ...row, recipients, sent: Number(row.sent || 0), failed: Number(row.failed || 0), pending: Number(row.pending || 0), opens: Number(row.opens || 0), openedContacts: Number(row.openedContacts || 0), openRate: recipients ? Number(((Number(row.openedContacts || 0) / recipients) * 100).toFixed(2)) : 0 };
 }
 
-async function handlePlatformRequest(request, response, requestUrl) {
+async function handlePlatformRequest(request, response, requestUrl, session) {
   try {
     const account = await getPlatformAccount();
-    const clientId = requestUrl.searchParams.get("clientId") || undefined;
+    const scopedClientId = session.role === "client" ? Number(session.clientId) : null;
+    if (session.role === "client" && (!Number.isSafeInteger(scopedClientId) || scopedClientId < 1)) throw new Error("client user is not assigned to a client");
+    const scopeClientId = (value) => {
+      const requested = value === undefined || value === null || value === "" ? null : Number(value);
+      if (scopedClientId && requested && requested !== scopedClientId) throw new Error("client access is limited to its own account");
+      return scopedClientId || requested || undefined;
+    };
+    const requirePlatformAdmin = () => {
+      if (!isPlatformAdmin(session)) throw new Error("administrator access is required");
+    };
+    const assertScopedCampaign = async (campaignId) => {
+      if (!scopedClientId) return;
+      const [rows] = await pool.execute("SELECT id FROM campaigns WHERE id = ? AND account_id = ? AND client_id = ?", [campaignId, account.id, scopedClientId]);
+      if (!rows[0]) throw new Error("campaign not found for client");
+    };
+    const assertScopedAudience = async (audienceId) => {
+      if (!scopedClientId) return;
+      const [rows] = await pool.execute("SELECT id FROM audiences WHERE id = ? AND account_id = ? AND client_id = ?", [audienceId, account.id, scopedClientId]);
+      if (!rows[0]) throw new Error("audience not found for client");
+    };
+    const assertScopedTemplate = async (templateId) => {
+      if (!scopedClientId) return;
+      const [rows] = await pool.execute("SELECT id FROM templates WHERE id = ? AND account_id = ? AND client_id = ?", [templateId, account.id, scopedClientId]);
+      if (!rows[0]) throw new Error("template not found for client");
+    };
+    const clientId = scopeClientId(requestUrl.searchParams.get("clientId"));
     const pathName = requestUrl.pathname;
 
     if (request.method === "GET" && pathName === "/api/platform/account") {
-      return sendJson(response, 200, { ok: true, account });
+      return sendJson(response, 200, { ok: true, account, access: { role: session.role, clientId: scopedClientId } });
     }
     if (request.method === "GET" && pathName === "/api/platform/clients") {
-      return sendJson(response, 200, { ok: true, rows: await platformRepository.listClients(account.id) });
+      const rows = await platformRepository.listClients(account.id);
+      return sendJson(response, 200, { ok: true, rows: scopedClientId ? rows.filter((client) => Number(client.id) === scopedClientId) : rows });
     }
     if (request.method === "POST" && pathName === "/api/platform/clients") {
+      requirePlatformAdmin();
       return sendJson(response, 201, { ok: true, client: await platformRepository.createClient(account.id, await readJsonBody(request)) });
     }
     const clientMatch = pathName.match(/^\/api\/platform\/clients\/(\d+)$/);
     if (request.method === "PATCH" && clientMatch) {
+      requirePlatformAdmin();
       return sendJson(response, 200, { ok: true, client: await platformRepository.updateClient(account.id, Number(clientMatch[1]), await readJsonBody(request)) });
+    }
+    if (request.method === "POST" && pathName === "/api/platform/users") {
+      requirePlatformAdmin();
+      const body = await readJsonBody(request);
+      const clientId = Number(body.clientId);
+      const email = String(body.email || "").trim().toLowerCase();
+      const name = String(body.name || "").trim();
+      const password = String(body.password || "");
+      if (!Number.isSafeInteger(clientId) || !email || !name || password.length < 10) throw new Error("clientId, name, email and a 10-character password are required");
+      const [clients] = await pool.execute("SELECT id FROM clients WHERE id = ? AND account_id = ? AND status = 'active'", [clientId, account.id]);
+      if (!clients[0]) throw new Error("client not found for account");
+      const [result] = await pool.execute("INSERT INTO users (account_id, client_id, name, email, password_hash, role) VALUES (?, ?, ?, ?, ?, 'client')", [account.id, clientId, name.slice(0, 160), email.slice(0, 255), hashPlatformPassword(password)]);
+      return sendJson(response, 201, { ok: true, user: { id: result.insertId, clientId, name, email, role: "client" } });
     }
     if (request.method === "GET" && pathName === "/api/platform/campaigns") {
       return sendJson(response, 200, { ok: true, rows: await platformRepository.listCampaigns(account.id, clientId) });
     }
     if (request.method === "POST" && pathName === "/api/platform/campaigns") {
-      return sendJson(response, 201, { ok: true, campaign: await platformRepository.createCampaign(account.id, await readJsonBody(request)) });
+      const body = await readJsonBody(request);
+      body.clientId = scopeClientId(body.clientId);
+      return sendJson(response, 201, { ok: true, campaign: await platformRepository.createCampaign(account.id, body) });
     }
     const campaignAction = pathName.match(/^\/api\/platform\/campaigns\/(\d+)\/(recipients|tests|approve|send|results)$/);
     if (campaignAction) {
       const campaignId = Number(campaignAction[1]);
+      await assertScopedCampaign(campaignId);
       const action = campaignAction[2];
       if (request.method === "POST" && action === "recipients") return sendJson(response, 201, { ok: true, ...await snapshotCampaignRecipients(account.id, campaignId) });
       if (request.method === "POST" && action === "tests") return sendJson(response, 200, { ok: true, rows: await sendCampaignTests(account.id, campaignId, await readJsonBody(request)) });
@@ -981,6 +1084,7 @@ async function handlePlatformRequest(request, response, requestUrl) {
     }
     const previewMatch = pathName.match(/^\/api\/platform\/campaigns\/(\d+)\/preview$/);
     if (request.method === "GET" && previewMatch) {
+      await assertScopedCampaign(Number(previewMatch[1]));
       const campaign = await getCampaignForDelivery(account.id, Number(previewMatch[1]));
       if (!campaign.html) throw new Error("campaign requires a template version for preview");
       const email = String(requestUrl.searchParams.get("email") || "preview@example.test");
@@ -990,6 +1094,7 @@ async function handlePlatformRequest(request, response, requestUrl) {
     }
     const campaignMatch = pathName.match(/^\/api\/platform\/campaigns\/(\d+)\/status$/);
     if (request.method === "PATCH" && campaignMatch) {
+      await assertScopedCampaign(Number(campaignMatch[1]));
       const body = await readJsonBody(request);
       return sendJson(response, 200, { ok: true, campaign: await platformRepository.transitionCampaign(account.id, Number(campaignMatch[1]), body.status) });
     }
@@ -997,20 +1102,25 @@ async function handlePlatformRequest(request, response, requestUrl) {
       return sendJson(response, 200, { ok: true, rows: await platformRepository.listAudiences(account.id, clientId) });
     }
     if (request.method === "POST" && pathName === "/api/platform/audiences") {
-      return sendJson(response, 201, { ok: true, audience: await platformRepository.createAudience(account.id, await readJsonBody(request)) });
+      const body = await readJsonBody(request);
+      body.clientId = scopeClientId(body.clientId);
+      return sendJson(response, 201, { ok: true, audience: await platformRepository.createAudience(account.id, body) });
     }
     const audienceMatch = pathName.match(/^\/api\/platform\/audiences\/(\d+)$/);
     if (request.method === "DELETE" && audienceMatch) {
+      await assertScopedAudience(Number(audienceMatch[1]));
       await platformRepository.deleteAudience(account.id, Number(audienceMatch[1]));
       response.writeHead(204); response.end(); return;
     }
     const audienceImport = pathName.match(/^\/api\/platform\/audiences\/(\d+)\/contacts\/import$/);
     if (request.method === "POST" && audienceImport) {
+      await assertScopedAudience(Number(audienceImport[1]));
       const body = await readJsonBody(request);
       return sendJson(response, 200, { ok: true, ...await platformRepository.importAudienceContacts(account.id, Number(audienceImport[1]), body.csv) });
     }
     const audienceContactsMatch = pathName.match(/^\/api\/platform\/audiences\/(\d+)\/contacts$/);
     if (request.method === "GET" && audienceContactsMatch) {
+      await assertScopedAudience(Number(audienceContactsMatch[1]));
       const [rows] = await pool.execute("SELECT ac.id, ac.email, ac.name, ac.status, ac.metadata_json AS metadataJson, ac.created_at AS createdAt FROM audience_contacts ac JOIN audiences a ON a.id = ac.audience_id WHERE ac.audience_id = ? AND a.account_id = ? ORDER BY ac.id DESC LIMIT 500", [Number(audienceContactsMatch[1]), account.id]);
       return sendJson(response, 200, { ok: true, rows });
     }
@@ -1018,19 +1128,24 @@ async function handlePlatformRequest(request, response, requestUrl) {
       return sendJson(response, 200, { ok: true, rows: await platformRepository.listTemplates(account.id, clientId) });
     }
     if (request.method === "POST" && pathName === "/api/platform/templates") {
-      return sendJson(response, 201, { ok: true, template: await platformRepository.createTemplate(account.id, await readJsonBody(request)) });
+      const body = await readJsonBody(request);
+      body.clientId = scopeClientId(body.clientId);
+      return sendJson(response, 201, { ok: true, template: await platformRepository.createTemplate(account.id, body) });
     }
     const templateVersionMatch = pathName.match(/^\/api\/platform\/templates\/(\d+)\/versions$/);
     if (request.method === "POST" && templateVersionMatch) {
+      await assertScopedTemplate(Number(templateVersionMatch[1]));
       return sendJson(response, 201, { ok: true, templateVersion: await platformRepository.addTemplateVersion(account.id, Number(templateVersionMatch[1]), await readJsonBody(request)) });
     }
     if (request.method === "GET" && templateVersionMatch) {
+      await assertScopedTemplate(Number(templateVersionMatch[1]));
       const [rows] = await pool.execute("SELECT v.id, v.version, v.subject, v.preheader, v.source_type AS sourceType, v.created_at AS createdAt FROM template_versions v JOIN templates t ON t.id = v.template_id WHERE v.template_id = ? AND t.account_id = ? ORDER BY v.version DESC", [Number(templateVersionMatch[1]), account.id]);
       return sendJson(response, 200, { ok: true, rows });
     }
     const templateAiMatch = pathName.match(/^\/api\/platform\/templates\/(\d+)\/ai$/);
     if (request.method === "POST" && templateAiMatch) {
       const templateId = Number(templateAiMatch[1]);
+      await assertScopedTemplate(templateId);
       const body = await readJsonBody(request);
       const [[current]] = await pool.execute("SELECT t.client_id AS clientId, v.html, v.subject, v.preheader FROM templates t JOIN template_versions v ON v.template_id = t.id WHERE t.id = ? AND t.account_id = ? ORDER BY v.version DESC LIMIT 1", [templateId, account.id]);
       if (!current) throw new Error("template not found for account");
@@ -1040,18 +1155,19 @@ async function handlePlatformRequest(request, response, requestUrl) {
     }
     const templateCloneMatch = pathName.match(/^\/api\/platform\/templates\/(\d+)\/clone$/);
     if (request.method === "POST" && templateCloneMatch) {
+      await assertScopedTemplate(Number(templateCloneMatch[1]));
       const body = await readJsonBody(request);
       const [[source]] = await pool.execute("SELECT t.client_id AS clientId, t.description, v.html, v.subject, v.preheader FROM templates t JOIN template_versions v ON v.template_id = t.id WHERE t.id = ? AND t.account_id = ? ORDER BY v.version DESC LIMIT 1", [Number(templateCloneMatch[1]), account.id]);
       if (!source) throw new Error("template not found for account");
       return sendJson(response, 201, { ok: true, template: await platformRepository.createTemplate(account.id, { ...source, name: body.name, clientId: body.clientId || source.clientId, sourceType: "clone", createdBy: body.createdBy }) });
     }
     if (request.method === "GET" && pathName === "/api/platform/assets") {
-      const [rows] = await pool.execute("SELECT id, client_id AS clientId, campaign_id AS campaignId, name, original_filename AS originalFilename, public_url AS publicUrl, mime_type AS mimeType, size, width, height, created_at AS createdAt FROM assets WHERE account_id = ? ORDER BY created_at DESC", [account.id]);
+      const [rows] = await pool.execute(`SELECT id, client_id AS clientId, campaign_id AS campaignId, name, original_filename AS originalFilename, public_url AS publicUrl, mime_type AS mimeType, size, width, height, created_at AS createdAt FROM assets WHERE account_id = ?${scopedClientId ? " AND client_id = ?" : ""} ORDER BY created_at DESC`, scopedClientId ? [account.id, scopedClientId] : [account.id]);
       return sendJson(response, 200, { ok: true, rows });
     }
     if (request.method === "POST" && pathName === "/api/platform/assets") {
       const body = await readJsonBody(request);
-      const clientId = Number(body.clientId);
+      const clientId = scopeClientId(body.clientId);
       if (!Number.isSafeInteger(clientId) || !body.filename || !body.base64 || !body.mimeType) throw new Error("clientId, filename, mimeType and base64 are required");
       const [clients] = await pool.execute("SELECT id FROM clients WHERE id = ? AND account_id = ?", [clientId, account.id]);
       if (!clients[0]) throw new Error("client not found for account");
@@ -1068,12 +1184,12 @@ async function handlePlatformRequest(request, response, requestUrl) {
       return sendJson(response, 201, { ok: true, asset: { id: result.insertId, publicUrl } });
     }
     if (request.method === "GET" && pathName === "/api/platform/ses-accounts") {
-      const [rows] = await pool.execute("SELECT id, client_id AS clientId, name, aws_region AS awsRegion, default_from_name AS defaultFromName, default_from_email AS defaultFromEmail, default_reply_to AS defaultReplyTo, status, created_at AS createdAt FROM ses_accounts WHERE account_id = ? ORDER BY name", [account.id]);
+      const [rows] = await pool.execute(`SELECT id, client_id AS clientId, name, aws_region AS awsRegion, default_from_name AS defaultFromName, default_from_email AS defaultFromEmail, default_reply_to AS defaultReplyTo, status, created_at AS createdAt FROM ses_accounts WHERE account_id = ?${scopedClientId ? " AND client_id = ?" : ""} ORDER BY name`, scopedClientId ? [account.id, scopedClientId] : [account.id]);
       return sendJson(response, 200, { ok: true, rows });
     }
     if (request.method === "POST" && pathName === "/api/platform/ses-accounts") {
       const body = await readJsonBody(request);
-      const clientId = Number(body.clientId);
+      const clientId = scopeClientId(body.clientId);
       if (!Number.isSafeInteger(clientId) || clientId < 1 || !body.name || !body.awsRegion || !body.accessKey || !body.secretKey || !body.fromEmail) throw new Error("clientId, name, awsRegion, accessKey, secretKey and fromEmail are required");
       const [clients] = await pool.execute("SELECT id FROM clients WHERE id = ? AND account_id = ?", [clientId, account.id]);
       if (!clients[0]) throw new Error("client not found for account");
@@ -1083,6 +1199,10 @@ async function handlePlatformRequest(request, response, requestUrl) {
     const jobAction = pathName.match(/^\/api\/platform\/send-jobs\/(\d+)(?:\/(pause|resume))?$/);
     if (jobAction) {
       const jobId = Number(jobAction[1]);
+      if (scopedClientId) {
+        const [rows] = await pool.execute("SELECT j.id FROM send_jobs j JOIN campaigns c ON c.id = j.campaign_id WHERE j.id = ? AND c.account_id = ? AND c.client_id = ?", [jobId, account.id, scopedClientId]);
+        if (!rows[0]) throw new Error("send job not found for client");
+      }
       if (request.method === "GET" && !jobAction[2]) {
         const [rows] = await pool.execute("SELECT id, campaign_id AS campaignId, status, total, processed, sent, failed, pending, started_at AS startedAt, finished_at AS finishedAt, last_activity_at AS lastActivity FROM send_jobs WHERE id = ?", [jobId]);
         if (!rows[0]) throw new Error("send job not found");
@@ -1107,6 +1227,18 @@ const server = http.createServer(async (request, response) => {
   }
 
   const requestUrl = new URL(request.url, "http://localhost");
+
+  if (request.method === "GET" && requestUrl.pathname === "/brand/hulul-logo.png") {
+    try {
+      const logo = await fs.readFile(path.join(publicDir, "brand", "hulul-logo.png"));
+      response.writeHead(200, { "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" });
+      response.end(logo);
+    } catch {
+      response.writeHead(404);
+      response.end("Not found");
+    }
+    return;
+  }
 
   if (request.method === "GET" && request.url === "/health") {
     return sendJson(response, 200, { ok: true });
@@ -1138,9 +1270,11 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && requestUrl.pathname === "/admin/tracking") {
-    if (!requireAdmin(request, response)) {
+    const session = requireAdmin(request, response);
+    if (!session) {
       return;
     }
+    if (!isPlatformAdmin(session)) return sendHtml(response, 403, renderLoginPage("El tracking global sólo está disponible para administradores."));
 
     return sendHtml(response, 200, renderAdminPage());
   }
@@ -1161,25 +1295,30 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && requestUrl.pathname === "/api/admin/links") {
-    if (!requireAdmin(request, response)) {
+    const session = requireAdmin(request, response);
+    if (!session) {
       return;
     }
+    if (!isPlatformAdmin(session)) return sendJson(response, 403, { ok: false, error: "forbidden" });
 
     return handleAdminLinks(request, response);
   }
 
   if (requestUrl.pathname.startsWith("/api/platform/")) {
-    if (!requireAdmin(request, response)) {
+    const session = requireAdmin(request, response);
+    if (!session) {
       return;
     }
-    return handlePlatformRequest(request, response, requestUrl);
+    return handlePlatformRequest(request, response, requestUrl, session);
   }
 
   const eventsMatch = requestUrl.pathname.match(/^\/api\/admin\/links\/(\d+)\/events$/);
   if (request.method === "GET" && eventsMatch) {
-    if (!requireAdmin(request, response)) {
+    const session = requireAdmin(request, response);
+    if (!session) {
       return;
     }
+    if (!isPlatformAdmin(session)) return sendJson(response, 403, { ok: false, error: "forbidden" });
 
     return handleAdminEvents(request, response, Number(eventsMatch[1]));
   }
@@ -1197,9 +1336,11 @@ const server = http.createServer(async (request, response) => {
   }
 
   if (request.method === "GET" && requestUrl.pathname === "/api/email-tracking/export") {
-    if (!requireAdmin(request, response)) {
+    const session = requireAdmin(request, response);
+    if (!session) {
       return;
     }
+    if (!isPlatformAdmin(session)) return sendJson(response, 403, { ok: false, error: "forbidden" });
 
     return handleExport(request, response);
   }
