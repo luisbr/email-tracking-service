@@ -6,7 +6,8 @@ import { renderTemplate, sendWithSes } from "./src/platform-services.js";
 const pool = mysql.createPool({ host: process.env.MYSQL_HOST, port: Number(process.env.MYSQL_PORT || 3306), user: process.env.MYSQL_USER, password: process.env.MYSQL_PASSWORD, database: process.env.MYSQL_DATABASE, connectionLimit: 5 });
 const baseUrl = String(process.env.EMAIL_TRACKING_BASE_URL || `http://${process.env.HOST || "127.0.0.1"}:${process.env.PORT || "3010"}`).replace(/\/$/, "");
 const encryptionKey = process.env.PLATFORM_ENCRYPTION_KEY;
-const maxAttempts = Math.max(1, Number(process.env.SEND_MAX_ATTEMPTS || 3));
+const configuredMaxAttempts = Number(process.env.SEND_MAX_ATTEMPTS);
+const maxAttempts = Number.isFinite(configuredMaxAttempts) && configuredMaxAttempts > 0 ? Math.floor(configuredMaxAttempts) : 3;
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function claimJob() {
