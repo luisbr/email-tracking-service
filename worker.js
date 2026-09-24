@@ -23,10 +23,11 @@ async function workJob(jobId) {
   while (true) {
     const [[freshJob]] = await pool.execute("SELECT status FROM send_jobs WHERE id = ?", [jobId]);
     if (!freshJob || freshJob.status !== "running") return;
-    const [recipients] = await pool.execute("SELECT id, email, tracking_token AS trackingToken FROM campaign_recipients WHERE campaign_id = ? AND (status IN ('pending', 'queued') OR (status = 'failed' AND attempts < ?)) ORDER BY id LIMIT ?", [job.campaignId, maxAttempts, job.batchSize]);
+    const batchSize = Math.max(1, Math.floor(Number(job.batchSize) || 10));
+    const [recipients] = await pool.execute(`SELECT id, email, tracking_token AS trackingToken FROM campaign_recipients WHERE campaign_id = ? AND (status IN ('pending', 'queued') OR (status = 'failed' AND attempts < ${maxAttempts})) ORDER BY id LIMIT ${batchSize}`, [job.campaignId]);
     if (!recipients.length) break;
     for (const recipient of recipients) {
-      const [claimed] = await pool.execute("UPDATE campaign_recipients SET status = 'sending', sending_at = CURRENT_TIMESTAMP, attempts = attempts + 1 WHERE id = ? AND (status IN ('pending', 'queued') OR (status = 'failed' AND attempts < ?))", [recipient.id, maxAttempts]);
+      const [claimed] = await pool.execute(`UPDATE campaign_recipients SET status = 'sending', sending_at = CURRENT_TIMESTAMP, attempts = attempts + 1 WHERE id = ? AND (status IN ('pending', 'queued') OR (status = 'failed' AND attempts < ${maxAttempts}))`, [recipient.id]);
       if (!claimed.affectedRows) continue;
       try {
         const imageUrl = `${baseUrl}/api/email-tracking/image?token=${recipient.trackingToken}`;
