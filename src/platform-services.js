@@ -46,7 +46,11 @@ export async function sendWithSes({ profile, encryptionKey, to, subject, html, r
 }
 
 export function renderTemplate(html, values) {
-  return String(html || "").replace(/{{\s*([a-z_]+)\s*}}/gi, (_, key) => String(values[key] ?? ""));
+  const rendered = String(html || "").replace(/{{\s*([a-z_]+)\s*}}/gi, (_, key) => String(values[key] ?? ""));
+  const pixelUrl = String(values.tracking_pixel_url || "");
+  if (!pixelUrl || rendered.includes(pixelUrl)) return rendered;
+  const pixel = `<img src="${pixelUrl}" width="1" height="1" alt="" style="display:block;border:0;outline:none" />`;
+  return /<\/body\s*>/i.test(rendered) ? rendered.replace(/<\/body\s*>/i, `${pixel}</body>`) : `${rendered}${pixel}`;
 }
 
 export async function uploadAssetToS3({ region, bucket, accessKeyId, secretAccessKey, key, body, mimeType }) {
