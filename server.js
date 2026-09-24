@@ -339,22 +339,26 @@ function buildAdminFilters(searchParams) {
   const params = [];
   const query = String(searchParams.get("q") || "").trim();
   const campaign = String(searchParams.get("campaign") || "").trim();
+  const opened = searchParams.get("opened") === "1";
 
   if (query) {
-    where.push("(email LIKE ? OR token LIKE ?)");
+    where.push("(links.email LIKE ? OR links.token LIKE ?)");
     params.push(`%${query}%`, `%${query}%`);
   }
 
   if (campaign) {
-    where.push("campaign = ?");
+    where.push("links.campaign = ?");
     params.push(campaign);
   }
+
+  if (opened) where.push("links.open_count > 0");
 
   return {
     whereSql: where.length ? `WHERE ${where.join(" AND ")}` : "",
     params,
     query,
-    campaign
+    campaign,
+    opened
   };
 }
 
@@ -365,7 +369,7 @@ async function listEmailTrackingLinksPage(searchParams) {
   const filters = buildAdminFilters(searchParams);
 
   const [countRows] = await pool.execute(
-    `SELECT COUNT(*) AS total FROM email_tracking_links ${filters.whereSql}`,
+    `SELECT COUNT(*) AS total FROM email_tracking_links links ${filters.whereSql}`,
     filters.params
   );
 
@@ -379,9 +383,14 @@ async function listEmailTrackingLinksPage(searchParams) {
        links.open_count AS openCount,
        links.last_opened_at AS lastOpenedAt,
        links.created_at AS createdAt,
+       recipients.status AS deliveryStatus,
+       recipients.sent_at AS sentAt,
+       recipients.failed_at AS failedAt,
+       recipients.last_error AS deliveryError,
        latest.event_type AS latestEventType,
        latest.created_at AS latestEventAt
      FROM email_tracking_links links
+     LEFT JOIN campaign_recipients recipients ON recipients.tracking_link_id = links.id
      LEFT JOIN email_tracking_events latest
        ON latest.id = (
          SELECT events.id
@@ -403,6 +412,7 @@ async function listEmailTrackingLinksPage(searchParams) {
     rows: rows.map((row) => ({
       ...row,
       createdAtText: formatDateTime(row.createdAt),
+      sentAtText: formatDateTime(row.sentAt),
       lastOpenedAtText: formatDateTime(row.lastOpenedAt),
       latestEventAtText: formatDateTime(row.latestEventAt)
     }))
@@ -741,7 +751,7 @@ function renderLegacyPlatformPage() {
 }
 
 function renderHululLogo(className = "brand-logo") {
-  const trackingFilter = className === "logo" ? `<script>window.addEventListener('load',()=>{const selectedCampaign=new URLSearchParams(location.search).get('campaign');if(!selectedCampaign)return;const input=document.querySelector('#campaign'),form=document.querySelector('#filters');if(input&&form){input.value=selectedCampaign;setTimeout(()=>form.dispatchEvent(new Event('submit',{cancelable:true})),250)}});</script>` : "";
+  const trackingFilter = className === "logo" ? `<script>(()=>{const query=new URLSearchParams(location.search),opened=query.get('opened')==='1',originalFetch=window.fetch.bind(window),deliveryByToken=new Map();window.fetch=async(...args)=>{const response=await originalFetch(...args);if(String(args[0]).includes('/api/admin/links?'))response.clone().json().then(data=>(data.rows||[]).forEach(row=>deliveryByToken.set(row.token,row))).catch(()=>{});return response};window.addEventListener('load',()=>{const selectedCampaign=query.get('campaign'),input=document.querySelector('#campaign'),form=document.querySelector('#filters');if(selectedCampaign&&input&&form){input.value=selectedCampaign;setTimeout(()=>form.dispatchEvent(new Event('submit',{cancelable:true})),250)}const label=document.createElement('label');label.style.cssText='display:flex;align-items:center;gap:7px;color:#9da4b9;font-size:13px';label.innerHTML='<input type="checkbox" id="openedOnly"> Con al menos una apertura';const checkbox=label.querySelector('input');checkbox.checked=opened;checkbox.addEventListener('change',()=>{const next=new URL(location.href);checkbox.checked?next.searchParams.set('opened','1'):next.searchParams.delete('opened');location.href=next.toString()});form.append(label);const table=document.querySelector('#table');new MutationObserver(()=>{const header=table.querySelector('thead tr');if(header&&!header.querySelector('.delivery-head')){header.insertAdjacentHTML('beforeend','<th class="delivery-head">Estatus de envío</th><th class="delivery-head">Fecha de envío</th>')}table.querySelectorAll('tbody tr').forEach(row=>{if(row.querySelector('.delivery-cell'))return;const token=row.cells[4]?.textContent.trim(),delivery=deliveryByToken.get(token);row.insertAdjacentHTML('beforeend','<td class="delivery-cell">'+(delivery?.deliveryStatus||'—')+'</td><td class="delivery-cell">'+(delivery?.sentAtText||'—')+'</td>')});if(opened){const exportLink=document.querySelector('#exportLink');const url=new URL(exportLink.href);url.searchParams.set('opened','1');exportLink.href=url.toString()}}).observe(table,{childList:true,subtree:true})})})();</script>` : "";
   return `<img class="${className}" src="/brand/hulul-logo.png" alt="HULUL">${trackingFilter}`;
 }
 
