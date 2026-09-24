@@ -741,7 +741,7 @@ function renderLegacyPlatformPage() {
 }
 
 function renderHululLogo(className = "brand-logo") {
-  const trackingFilter = className === "logo" ? `<script>window.addEventListener('load',()=>{const selectedCampaign=new URLSearchParams(location.search).get('campaign');if(!selectedCampaign)return;const input=document.querySelector('#campaign'),form=document.querySelector('#filters');if(input&&form){input.value=selectedCampaign;form.dispatchEvent(new Event('submit',{cancelable:true}))}});</script>` : "";
+  const trackingFilter = className === "logo" ? `<script>window.addEventListener('load',()=>{const selectedCampaign=new URLSearchParams(location.search).get('campaign');if(!selectedCampaign)return;const input=document.querySelector('#campaign'),form=document.querySelector('#filters');if(input&&form){input.value=selectedCampaign;setTimeout(()=>form.dispatchEvent(new Event('submit',{cancelable:true})),250)}});</script>` : "";
   return `<img class="${className}" src="/brand/hulul-logo.png" alt="HULUL">${trackingFilter}`;
 }
 
