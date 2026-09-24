@@ -17,12 +17,12 @@ async function claimJob() {
 }
 
 async function workJob(jobId) {
-  const [[job]] = await pool.execute(`SELECT j.*, c.name AS campaignName, c.subject, c.preheader, c.from_name AS fromName, c.from_email AS fromEmail, c.reply_to AS replyTo, v.html, s.aws_region AS awsRegion, s.access_key_encrypted AS accessKeyEncrypted, s.secret_key_encrypted AS secretKeyEncrypted, s.default_from_name AS defaultFromName, s.default_from_email AS defaultFromEmail, s.default_reply_to AS defaultReplyTo FROM send_jobs j JOIN campaigns c ON c.id = j.campaign_id JOIN template_versions v ON v.id = c.template_version_id JOIN ses_accounts s ON s.id = c.ses_account_id WHERE j.id = ?`, [jobId]);
+  const [[job]] = await pool.execute(`SELECT j.*, j.campaign_id AS campaignId, j.batch_size AS batchSize, j.rate_per_second AS ratePerSecond, c.name AS campaignName, c.subject, c.preheader, c.from_name AS fromName, c.from_email AS fromEmail, c.reply_to AS replyTo, v.html, s.aws_region AS awsRegion, s.access_key_encrypted AS accessKeyEncrypted, s.secret_key_encrypted AS secretKeyEncrypted, s.default_from_name AS defaultFromName, s.default_from_email AS defaultFromEmail, s.default_reply_to AS defaultReplyTo FROM send_jobs j JOIN campaigns c ON c.id = j.campaign_id JOIN template_versions v ON v.id = c.template_version_id JOIN ses_accounts s ON s.id = c.ses_account_id WHERE j.id = ?`, [jobId]);
   if (!job) return;
   while (true) {
     const [[freshJob]] = await pool.execute("SELECT status FROM send_jobs WHERE id = ?", [jobId]);
     if (!freshJob || freshJob.status !== "running") return;
-    const [recipients] = await pool.execute("SELECT id, email, tracking_token AS trackingToken FROM campaign_recipients WHERE campaign_id = ? AND (status IN ('pending', 'queued') OR (status = 'failed' AND attempts < ?)) ORDER BY id LIMIT ?", [job.campaign_id, maxAttempts, job.batch_size]);
+    const [recipients] = await pool.execute("SELECT id, email, tracking_token AS trackingToken FROM campaign_recipients WHERE campaign_id = ? AND (status IN ('pending', 'queued') OR (status = 'failed' AND attempts < ?)) ORDER BY id LIMIT ?", [job.campaignId, maxAttempts, job.batchSize]);
     if (!recipients.length) break;
     for (const recipient of recipients) {
       const [claimed] = await pool.execute("UPDATE campaign_recipients SET status = 'sending', sending_at = CURRENT_TIMESTAMP, attempts = attempts + 1 WHERE id = ? AND (status IN ('pending', 'queued') OR (status = 'failed' AND attempts < ?))", [recipient.id, maxAttempts]);
@@ -36,12 +36,12 @@ async function workJob(jobId) {
       } catch (error) {
         await pool.execute("UPDATE campaign_recipients SET status = 'failed', failed_at = CURRENT_TIMESTAMP, last_error = ? WHERE id = ?", [String(error.message || error).slice(0, 4000), recipient.id]);
       }
-      await pool.execute("UPDATE send_jobs SET processed = (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ? AND status IN ('sent', 'failed')), sent = (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ? AND status = 'sent'), failed = (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ? AND status = 'failed'), pending = (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ? AND status IN ('pending', 'queued', 'sending')), last_activity_at = CURRENT_TIMESTAMP WHERE id = ?", [job.campaign_id, job.campaign_id, job.campaign_id, job.campaign_id, jobId]);
-      await sleep(Math.ceil(1000 / Math.max(1, job.rate_per_second)));
+      await pool.execute("UPDATE send_jobs SET processed = (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ? AND status IN ('sent', 'failed')), sent = (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ? AND status = 'sent'), failed = (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ? AND status = 'failed'), pending = (SELECT COUNT(*) FROM campaign_recipients WHERE campaign_id = ? AND status IN ('pending', 'queued', 'sending')), last_activity_at = CURRENT_TIMESTAMP WHERE id = ?", [job.campaignId, job.campaignId, job.campaignId, job.campaignId, jobId]);
+      await sleep(Math.ceil(1000 / Math.max(1, job.ratePerSecond)));
     }
   }
   await pool.execute("UPDATE send_jobs SET status = 'completed', finished_at = CURRENT_TIMESTAMP, last_activity_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'running'", [jobId]);
-  await pool.execute("UPDATE campaigns SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'sending'", [job.campaign_id]);
+  await pool.execute("UPDATE campaigns SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'sending'", [job.campaignId]);
 }
 
 async function loop() {
